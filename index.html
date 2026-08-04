@@ -235,8 +235,10 @@
   .radio-team:active{background:var(--panel-2);}
   .spinner{width:20px;height:20px;border-radius:50%;border:2.5px solid rgba(255,255,255,0.15);border-top-color:var(--ball);animation:spin 0.7s linear infinite; margin:40px auto;}
   @keyframes spin{to{transform:rotate(360deg);}}
-  .leg-badge{font-family:'JetBrains Mono'; font-size:11px; text-transform:uppercase; letter-spacing:0.6px; color:var(--text-soft); margin:20px 0 8px 2px; font-weight:700;}
+  .leg-badge{font-family:'Bebas Neue'; font-size:17px; letter-spacing:0.4px; color:var(--ball); margin:22px 0 8px 2px;}
   .leg-badge:first-child{margin-top:0;}
+  .round-label{font-family:'JetBrains Mono'; font-size:10.5px; text-transform:uppercase; letter-spacing:0.6px; color:var(--text-soft); margin:14px 0 6px 4px; font-weight:700; display:flex; align-items:center; gap:6px;}
+  .round-label::before{content:""; width:14px; height:1px; background:rgba(255,255,255,0.2);}
   .bye-badge{background:rgba(255,255,255,0.08); color:var(--text-soft); font-size:11px; font-weight:700; padding:4px 10px; border-radius:100px;}
   .champion-banner{
     background:linear-gradient(135deg, var(--ball), #EAF59B); color:#12280F;
@@ -349,13 +351,44 @@
   }
 
   // ---------- Domain logic: Liga (feste Teams) ----------
-  function generateRoundRobin(teams, leg){
-    const matches = [];
-    for(let i=0;i<teams.length;i++){
-      for(let j=i+1;j<teams.length;j++){
-        matches.push({ id: uid("m"), teamAId: teams[i].id, teamBId: teams[j].id, sets: [], leg: leg||"Hin" });
+  // Circle method: produces rounds where every team plays at most once per round
+  // (so all matches in a round can run in parallel). Odd team counts get one bye per round.
+  function circleMethodRounds(teams){
+    let ids = teams.map(tm=>tm.id);
+    if(ids.length % 2 !== 0) ids = ids.concat([null]);
+    const n = ids.length;
+    const fixed = ids[0];
+    let rotating = ids.slice(1);
+    const rounds = [];
+    for(let r=0;r<n-1;r++){
+      const arr = [fixed, ...rotating];
+      const pairs = [];
+      for(let i=0;i<n/2;i++){
+        const a = arr[i], b = arr[n-1-i];
+        if(a!=null && b!=null) pairs.push([a,b]);
       }
+      rounds.push(pairs);
+      rotating.unshift(rotating.pop());
     }
+    return rounds;
+  }
+
+  // Turns circle-method rounds into a flat match list, splitting any round that has
+  // more matches than available courts into extra sequential rounds.
+  function buildLegMatches(teams, leg, courts){
+    const c = Math.max(1, courts||1);
+    const circleRounds = circleMethodRounds(teams);
+    const matches = [];
+    let roundCounter = 0;
+    circleRounds.forEach(pairs=>{
+      for(let i=0;i<pairs.length;i+=c){
+        const chunk = pairs.slice(i, i+c);
+        chunk.forEach(([a,b])=>{
+          matches.push({ id: uid("m"), teamAId:a, teamBId:b, sets: [], leg: leg||"Hin", round: roundCounter });
+        });
+        roundCounter++;
+      }
+    });
     return matches;
   }
 
@@ -882,6 +915,13 @@
           </div>
         </div>
         ${state.createError ? `<div class="banner-error">${esc(state.createError)}</div>` : ""}
+        ${(d.type==='liga' && d.teams.length>=2) ? `
+        <div class="field">
+          <label>Anzahl Courts</label>
+          <input class="input" type="number" min="1" max="20" id="courtsInput" value="${d.courts || Math.max(1, Math.floor(d.teams.length/2))}">
+        </div>
+        <div class="banner-info">Legt fest, wie viele Spiele gleichzeitig laufen können — die Liga wird in passende Runden eingeteilt statt alles hintereinander aufzulisten.</div>
+        ` : ""}
         <div class="banner-info">${d.type==='ko' ? 'Sobald der Turnierbaum ausgelost ist, können keine Teams mehr ergänzt werden.' : 'Sobald der Spielplan erstellt ist, können keine Teams mehr ergänzt werden.'}</div>
         <button class="btn btn-primary" data-action="startTournament" ${d.teams.length<min?"disabled":""}>${d.type==='ko' ? 'Turnierbaum auslosen & Turnier starten' : 'Spielplan erstellen & Turnier starten'}</button>
       </div>
@@ -977,14 +1017,25 @@
     </table>`;
   }
 
+  function renderRoundGroupedMatches(t, matches){
+    const roundNums = [...new Set(matches.map(m=>m.round))].sort((a,b)=>a-b);
+    return roundNums.map(rn=>{
+      const roundMatches = matches.filter(m=>m.round===rn);
+      return `<div class="round-label">Runde ${rn+1}</div>${roundMatches.map(m=>matchCardHtml(t,m,null)).join("")}`;
+    }).join("");
+  }
+
   function renderTeamMatches(t){
+    const courts = t.courts || 1;
+    let html = `<div class="banner-info" style="margin-bottom:14px;">🏟 ${courts} Court${courts>1?'s':''} — bis zu ${courts} Spiel${courts>1?'e':''} pro Runde parallel.</div>`;
     if(t.rueckrunde){
       const hin = t.matches.filter(m=>m.leg!=="Rueck");
       const rueck = t.matches.filter(m=>m.leg==="Rueck");
-      return `<div class="leg-badge">Hinrunde</div>${hin.map(m=>matchCardHtml(t,m,null)).join("")}<div class="leg-badge">Rückrunde</div>${rueck.map(m=>matchCardHtml(t,m,null)).join("")}`;
+      html += `<div class="leg-badge">Hinrunde</div>${renderRoundGroupedMatches(t, hin)}<div class="leg-badge">Rückrunde</div>${renderRoundGroupedMatches(t, rueck)}`;
+    } else {
+      html += t.matches.length ? renderRoundGroupedMatches(t, t.matches) : `<div class="empty">Keine Spiele.</div>`;
     }
-    const html = t.matches.map(m=>matchCardHtml(t,m,null)).join("");
-    return html || `<div class="empty">Keine Spiele.</div>`;
+    return html;
   }
 
   function renderIndividualStandings(t){
@@ -1265,9 +1316,16 @@
           if(d.teams.length<3) return;
           t.teams = d.teams;
           t.rueckrunde = !!d.rueckrunde;
-          let matches = generateRoundRobin(d.teams, "Hin");
+          const courtsEl = document.getElementById("courtsInput");
+          let courts = 1;
+          if(courtsEl){
+            const cv = parseInt(courtsEl.value,10);
+            courts = (!isNaN(cv) && cv>0) ? Math.min(cv,20) : Math.max(1, Math.floor(d.teams.length/2));
+          }
+          t.courts = courts;
+          let matches = buildLegMatches(d.teams, "Hin", courts);
           if(t.rueckrunde){
-            matches = matches.concat(generateRoundRobin(d.teams, "Rueck").map(m=>({ ...m, teamAId:m.teamBId, teamBId:m.teamAId })));
+            matches = matches.concat(buildLegMatches(d.teams, "Rueck", courts).map(m=>({ ...m, teamAId:m.teamBId, teamBId:m.teamAId })));
           }
           t.matches = matches;
         } else {
