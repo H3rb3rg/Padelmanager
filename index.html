@@ -235,6 +235,14 @@
   .radio-team:active{background:var(--panel-2);}
   .spinner{width:20px;height:20px;border-radius:50%;border:2.5px solid rgba(255,255,255,0.15);border-top-color:var(--ball);animation:spin 0.7s linear infinite; margin:40px auto;}
   @keyframes spin{to{transform:rotate(360deg);}}
+  .leg-badge{font-family:'JetBrains Mono'; font-size:11px; text-transform:uppercase; letter-spacing:0.6px; color:var(--text-soft); margin:20px 0 8px 2px; font-weight:700;}
+  .leg-badge:first-child{margin-top:0;}
+  .bye-badge{background:rgba(255,255,255,0.08); color:var(--text-soft); font-size:11px; font-weight:700; padding:4px 10px; border-radius:100px;}
+  .champion-banner{
+    background:linear-gradient(135deg, var(--ball), #EAF59B); color:#12280F;
+    border-radius:var(--radius); padding:18px; text-align:center;
+    font-family:'Bebas Neue'; font-size:21px; letter-spacing:0.4px; margin-bottom:18px;
+  }
 </style>
 </head>
 <body>
@@ -286,39 +294,34 @@
   function esc(s){
     return String(s==null?"":s).replace(/[&<>"']/g, m => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));
   }
+  function shuffleArray(arr){
+    for(let i=arr.length-1;i>0;i--){
+      const j = Math.floor(Math.random()*(i+1));
+      [arr[i],arr[j]] = [arr[j],arr[i]];
+    }
+    return arr;
+  }
 
   // ---------- App state ----------
   const state = {
     view: "loading",
     identity: null,
     myTournaments: [],
-    current: null,       // full tournament object
+    current: null,
     currentCode: null,
-    tab: "table",         // table | matches
-    modal: null,          // null | invite | score | jointeam | error
+    tab: "table",
+    modal: null,
     modalData: {},
-    draft: null,          // tournament creation draft
+    draft: null,
     joinCode: "",
     joinError: "",
     createError: "",
-    pollHandle: null,
-    superTB: false,
-    toast: null
+    pollHandle: null
   };
 
   const app = document.getElementById("app");
 
-  // ---------- Domain logic ----------
-  function generateRoundRobin(teams){
-    const matches = [];
-    for(let i=0;i<teams.length;i++){
-      for(let j=i+1;j<teams.length;j++){
-        matches.push({ id: uid("m"), teamAId: teams[i].id, teamBId: teams[j].id, sets: [], superTiebreak:false, completed:false });
-      }
-    }
-    return matches;
-  }
-
+  // ---------- Domain logic: scoring primitives ----------
   function setWinner(a,b,isSuper){
     if(a===b || a==null || b==null || isNaN(a) || isNaN(b)) return null;
     const hi = Math.max(a,b), lo = Math.min(a,b);
@@ -331,18 +334,29 @@
     return null;
   }
 
+  // Shape-agnostic: works for team matches, pair (individual) matches and KO matches.
   function evaluateMatch(match){
     let winsA=0, winsB=0;
-    match.sets.forEach(s=>{
+    (match.sets||[]).forEach(s=>{
       const w = setWinner(s.a, s.b, s.superTiebreak);
       if(w==="A") winsA++;
       else if(w==="B") winsB++;
     });
-    const target = 2;
-    let winnerId = null;
-    if(winsA>=target) winnerId = match.teamAId;
-    else if(winsB>=target) winnerId = match.teamBId;
-    return { winsA, winsB, winnerId, completed: !!winnerId };
+    let winnerSide = null;
+    if(winsA>=2) winnerSide = "A";
+    else if(winsB>=2) winnerSide = "B";
+    return { winsA, winsB, winnerSide, completed: !!winnerSide };
+  }
+
+  // ---------- Domain logic: Liga (feste Teams) ----------
+  function generateRoundRobin(teams, leg){
+    const matches = [];
+    for(let i=0;i<teams.length;i++){
+      for(let j=i+1;j<teams.length;j++){
+        matches.push({ id: uid("m"), teamAId: teams[i].id, teamBId: teams[j].id, sets: [], leg: leg||"Hin" });
+      }
+    }
+    return matches;
   }
 
   function computeStandings(t){
@@ -364,8 +378,8 @@
         if(w==="A") rA.setsW++, rB.setsL++;
         else rB.setsW++, rA.setsL++;
       });
-      if(ev.winnerId===m.teamAId){ rA.wins++; rA.points+=2; rB.losses++; }
-      else { rB.wins++; rB.points+=2; rA.losses++; }
+      if(ev.winnerSide==="A"){ rA.wins++; rA.points+=2; rB.losses++; }
+      else if(ev.winnerSide==="B"){ rB.wins++; rB.points+=2; rA.losses++; }
     });
     return Object.values(rows).sort((x,y)=>{
       if(y.points!==x.points) return y.points-x.points;
@@ -376,32 +390,206 @@
     });
   }
 
+  // ---------- Domain logic: Liga (ohne feste Teams / Americano-Rotation) ----------
+  function generateAmericanoRounds(players, numRounds){
+    const ids = players.map(p=>p.id);
+    const n = ids.length;
+    const partnerCount = {}, opponentCount = {}, sitOutCount = {};
+    ids.forEach(a=>{
+      partnerCount[a] = {}; opponentCount[a] = {}; sitOutCount[a] = 0;
+      ids.forEach(b=>{ if(a!==b){ partnerCount[a][b]=0; opponentCount[a][b]=0; } });
+    });
+    const restCount = n % 4;
+    const rounds = [];
+
+    for(let r=0;r<numRounds;r++){
+      let best = null, bestScore = Infinity;
+      for(let attempt=0; attempt<120; attempt++){
+        let sitting = [];
+        if(restCount>0){
+          const bySit = ids.slice().sort((a,b)=> sitOutCount[a]-sitOutCount[b] || (Math.random()-0.5));
+          sitting = bySit.slice(0, restCount);
+        }
+        const playing = shuffleArray(ids.filter(id=>!sitting.includes(id)));
+        const groups = [];
+        for(let i=0;i<playing.length;i+=4) groups.push(playing.slice(i,i+4));
+
+        let score = 0;
+        const candidateMatches = [];
+        let ok = true;
+        groups.forEach(g=>{
+          if(g.length<4){ ok = false; return; }
+          const splits = [
+            [[g[0],g[1]],[g[2],g[3]]],
+            [[g[0],g[2]],[g[1],g[3]]],
+            [[g[0],g[3]],[g[1],g[2]]]
+          ];
+          let bestSplit=null, bestSplitScore=Infinity;
+          splits.forEach(([pa,pb])=>{
+            let s = partnerCount[pa[0]][pa[1]] + partnerCount[pb[0]][pb[1]];
+            pa.forEach(x=> pb.forEach(y=> s += opponentCount[x][y]));
+            if(s<bestSplitScore){ bestSplitScore=s; bestSplit=[pa,pb]; }
+          });
+          score += bestSplitScore;
+          candidateMatches.push({ pairA: bestSplit[0], pairB: bestSplit[1] });
+        });
+        if(!ok) continue;
+        sitting.forEach(id=> score += sitOutCount[id]*0.01);
+        if(score<bestScore){ bestScore=score; best = { sitting: sitting.slice(), matches: candidateMatches }; }
+      }
+      if(!best) best = { sitting: [], matches: [] };
+      best.matches.forEach(m=>{
+        const [a1,a2]=m.pairA, [b1,b2]=m.pairB;
+        partnerCount[a1][a2]++; partnerCount[a2][a1]++;
+        partnerCount[b1][b2]++; partnerCount[b2][b1]++;
+        m.pairA.forEach(x=> m.pairB.forEach(y=>{ opponentCount[x][y]++; opponentCount[y][x]++; }));
+      });
+      best.sitting.forEach(id=> sitOutCount[id]++);
+      rounds.push({
+        index: r,
+        sitOut: best.sitting,
+        matches: best.matches.map(m=>({ id: uid("am"), pairA:m.pairA, pairB:m.pairB, sets:[] }))
+      });
+    }
+    return rounds;
+  }
+
+  function computeIndividualStandings(t){
+    const rows = {};
+    t.players.forEach(p=>{ rows[p.id] = { player:p, played:0, wins:0, points:0 }; });
+    (t.ligaRounds||[]).forEach(rd=>{
+      rd.matches.forEach(m=>{
+        const ev = evaluateMatch(m);
+        m.pairA.forEach(pid=>{ if(rows[pid]) rows[pid].played++; });
+        m.pairB.forEach(pid=>{ if(rows[pid]) rows[pid].played++; });
+        m.sets.forEach(s=>{
+          const w = setWinner(s.a, s.b, s.superTiebreak);
+          if(!w) return;
+          m.pairA.forEach(pid=>{ if(rows[pid]) rows[pid].points += s.a; });
+          m.pairB.forEach(pid=>{ if(rows[pid]) rows[pid].points += s.b; });
+        });
+        if(ev.winnerSide==="A") m.pairA.forEach(pid=>{ if(rows[pid]) rows[pid].wins++; });
+        else if(ev.winnerSide==="B") m.pairB.forEach(pid=>{ if(rows[pid]) rows[pid].wins++; });
+      });
+    });
+    return Object.values(rows).sort((x,y)=> y.points-x.points || y.wins-x.wins);
+  }
+
+  // ---------- Domain logic: K.-o.-System ----------
+  function nextPow2(n){ let p=1; while(p<n) p*=2; return p; }
+
+  function buildKOBracket(teams){
+    // Distribute byes so each bye match holds exactly one real team —
+    // never pair two byes together, which would create a dead slot with no winner.
+    const n = teams.length;
+    const size = nextPow2(n);
+    const numMatches = size/2;
+    const byeCount = size - n;
+    const shuffledTeams = shuffleArray(teams.map(tm=>tm.id));
+    const byeMatchIndices = new Set(shuffleArray([...Array(numMatches).keys()]).slice(0, byeCount));
+    let cursor = 0;
+    const matches = [];
+    for(let i=0;i<numMatches;i++){
+      let a, b;
+      if(byeMatchIndices.has(i)){
+        a = shuffledTeams[cursor++]; b = null;
+      } else {
+        a = shuffledTeams[cursor++]; b = shuffledTeams[cursor++];
+      }
+      const m = { id: uid("km"), roundIndex:0, slotIndex:i, teamAId:a, teamBId:b, sets:[], bye:false, winnerId:null, sourceA:null, sourceB:null };
+      if(a==null || b==null){ m.bye = true; m.winnerId = a || b; }
+      matches.push(m);
+    }
+    const totalRounds = Math.log2(size);
+    for(let r=1;r<totalRounds;r++){
+      const count = size/Math.pow(2,r+1);
+      for(let i=0;i<count;i++){
+        const srcA = matches.find(x=>x.roundIndex===r-1 && x.slotIndex===2*i);
+        const srcB = matches.find(x=>x.roundIndex===r-1 && x.slotIndex===2*i+1);
+        matches.push({ id: uid("km"), roundIndex:r, slotIndex:i, teamAId:null, teamBId:null, sets:[], bye:false, winnerId:null, sourceA:srcA.id, sourceB:srcB.id });
+      }
+    }
+    return matches;
+  }
+
+  function koWinnerId(m){
+    if(m.bye) return m.winnerId;
+    const ev = evaluateMatch(m);
+    if(ev.winnerSide==="A") return m.teamAId;
+    if(ev.winnerSide==="B") return m.teamBId;
+    return null;
+  }
+  function koCompleted(m){ return m.bye ? true : evaluateMatch(m).completed; }
+
+  function propagateKO(t){
+    const matches = t.matches;
+    matches.sort((a,b)=> a.roundIndex-b.roundIndex || a.slotIndex-b.slotIndex);
+    matches.forEach(m=>{
+      if(m.roundIndex===0) return;
+      const srcA = matches.find(x=>x.id===m.sourceA);
+      const srcB = matches.find(x=>x.id===m.sourceB);
+      m.teamAId = (srcA && koCompleted(srcA)) ? koWinnerId(srcA) : null;
+      m.teamBId = (srcB && koCompleted(srcB)) ? koWinnerId(srcB) : null;
+    });
+    const maxRound = Math.max(...matches.map(m=>m.roundIndex));
+    const final = matches.find(m=>m.roundIndex===maxRound);
+    t.champion = (final && koCompleted(final)) ? koWinnerId(final) : null;
+  }
+
+  function roundName(r, total){
+    const fromEnd = total-1-r;
+    if(fromEnd===0) return "Finale";
+    if(fromEnd===1) return "Halbfinale";
+    if(fromEnd===2) return "Viertelfinale";
+    if(fromEnd===3) return "Achtelfinale";
+    return "Runde " + (r+1);
+  }
+
+  // ---------- Name / permission helpers ----------
   function teamName(t, id){
-    const team = t.teams.find(x=>x.id===id);
+    const team = (t.teams||[]).find(x=>x.id===id);
     return team ? team.name : "?";
+  }
+  function playerName(t, id){
+    const p = (t.players||[]).find(x=>x.id===id);
+    return p ? p.name : "?";
+  }
+  function sideLabel(t, match, side){
+    if(match.pairA){
+      const ids = side==="A" ? match.pairA : match.pairB;
+      return ids.map(id=>playerName(t,id)).join(" & ");
+    }
+    const id = side==="A" ? match.teamAId : match.teamBId;
+    if(id==null) return "TBD";
+    return teamName(t, id);
   }
 
   function myMembership(t){
     if(!t || !state.identity) return null;
     return t.members.find(m=>m.userId===state.identity.id) || null;
   }
-
   function isOrganizer(t){
     return t && state.identity && t.organizerId === state.identity.id;
   }
-
   function canEditMatch(t, match){
     if(isOrganizer(t)) return true;
     const mem = myMembership(t);
     if(!mem || !mem.teamId) return false;
-    return mem.teamId === match.teamAId || mem.teamId === match.teamBId;
+    if(match.pairA) return match.pairA.includes(mem.teamId) || match.pairB.includes(mem.teamId);
+    if(match.teamAId==null || match.teamBId==null) return false;
+    return mem.teamId===match.teamAId || mem.teamId===match.teamBId;
+  }
+
+  function entityList(t){
+    if(t.type==="liga" && t.ligaMode==="individual"){
+      return t.players.map(p=>({ id:p.id, name:p.name, sub:"" }));
+    }
+    return t.teams.map(tm=>({ id:tm.id, name:tm.name, sub:[tm.p1,tm.p2].filter(Boolean).join(" & ") }));
   }
 
   // ---------- Persistence flows ----------
   async function loadIdentity(){
-    let id = await sGet("identity", false);
-    if(!id){ return null; }
-    return id;
+    return await sGet("identity", false);
   }
   async function saveIdentity(name){
     const id = { id: uid("u"), name: name.trim() };
@@ -416,8 +604,18 @@
     const list = await getMyCodes();
     if(!list.includes(code)){ list.push(code); await sSet("my-codes", list, false); }
   }
+  function normalizeTournament(t){
+    if(!t) return t;
+    if(!t.type) t.type = "liga";
+    if(t.type==="liga" && !t.ligaMode) t.ligaMode = "teams";
+    if(!t.teams) t.teams = [];
+    if(!t.players) t.players = [];
+    if(!t.matches) t.matches = [];
+    if(!t.ligaRounds) t.ligaRounds = [];
+    return t;
+  }
   async function loadTournament(code){
-    return await sGet("tournament:" + code, true);
+    return normalizeTournament(await sGet("tournament:" + code, true));
   }
   async function saveTournament(t){
     t.updatedAt = Date.now();
@@ -460,7 +658,7 @@
 
   async function openDetail(code){
     const t = await loadTournament(code);
-    if(!t){ state.toast = "Turnier nicht gefunden."; return goHome(); }
+    if(!t){ return goHome(); }
     state.current = t; state.currentCode = code; state.view = "detail"; state.tab = "table"; state.modal=null;
     startPolling();
     render();
@@ -511,12 +709,14 @@
     const items = list.map(t=>{
       const mem = myMembership(t);
       const role = isOrganizer(t) ? "Turnierleiter" : (mem && mem.teamId ? "Spieler" : "Zuschauer");
+      const countLabel = (t.type==="liga" && t.ligaMode==="individual") ? `${t.players.length} Spieler:innen` : `${t.teams.length} Teams`;
+      const typeLabel = t.type==="ko" ? "K.-o.-System" : (t.ligaMode==="individual" ? "Liga · ohne feste Teams" : "Liga");
       return `
       <div class="tourn-card" data-action="openDetail" data-code="${esc(t.code)}">
         <div class="name">${esc(t.name)}</div>
         <div class="meta">
-          <span class="pill">${t.started ? "Liga läuft" : "Wird vorbereitet"}</span>
-          <span class="pill muted">${t.teams.length} Teams</span>
+          <span class="pill">${esc(typeLabel)}</span>
+          <span class="pill muted">${esc(countLabel)}</span>
           <span class="pill muted">${esc(role)}</span>
         </div>
       </div>`;
@@ -547,7 +747,7 @@
 
   // ---------- Create: step 1 (name + type) ----------
   function ensureDraft(){
-    if(!state.draft) state.draft = { name:"", type:"liga", teams:[] };
+    if(!state.draft) state.draft = { name:"", type:"liga", ligaMode:"teams", rueckrunde:false, rounds:6, teams:[], players:[] };
     return state.draft;
   }
   function viewCreate(){
@@ -565,28 +765,85 @@
         </div>
         <div class="field">
           <label>Turnierart</label>
-          <div class="type-option selected" data-action="noop">
+          <div class="type-option ${d.type==='liga'?'selected':''}" data-action="selectType" data-type="liga">
             <div class="t-name">🏆 Liga (Jeder gegen Jeden)</div>
-            <div class="t-desc">Jedes Team spielt einmal gegen jedes andere Team. Tabelle mit Punkten, Sätzen und Spielen.</div>
+            <div class="t-desc">Alle spielen gegeneinander. Tabelle mit Punkten, Sätzen und Spielen.</div>
           </div>
-          <div class="type-option disabled" style="margin-top:8px;">
-            <div class="t-name">K.-o.-System</div>
-            <div class="t-desc">Bald verfügbar</div>
-          </div>
-          <div class="type-option disabled" style="margin-top:8px;">
-            <div class="t-name">Americano</div>
-            <div class="t-desc">Bald verfügbar</div>
+          <div class="type-option ${d.type==='ko'?'selected':''}" style="margin-top:8px;" data-action="selectType" data-type="ko">
+            <div class="t-name">🥊 K.-o.-System</div>
+            <div class="t-desc">Turnierbaum mit zufälliger Auslosung. Bei Niederlage ist ein Team raus.</div>
           </div>
         </div>
+        ${d.type==='liga' ? `
+        <div class="field">
+          <label>Team-Modus</label>
+          <div class="type-option ${d.ligaMode==='teams'?'selected':''}" data-action="selectLigaMode" data-mode="teams">
+            <div class="t-name">Feste Teams</div>
+            <div class="t-desc">Ihr tretet paarweise unter einem Teamnamen an.</div>
+          </div>
+          <div class="type-option ${d.ligaMode==='individual'?'selected':''}" style="margin-top:8px;" data-action="selectLigaMode" data-mode="individual">
+            <div class="t-name">Ohne feste Teams</div>
+            <div class="t-desc">Nur Namen eintragen — pro Runde werden neue Zweier-Partner verlost, jede:r sammelt eigene Punkte.</div>
+          </div>
+        </div>
+        ${d.ligaMode==='teams' ? `
+        <div class="card">
+          <div class="toggle-row">
+            <span>Rückrunde spielen (Hin- &amp; Rückrunde)</span>
+            <div class="switch ${d.rueckrunde?'on':''}" data-action="toggleRueckrunde"><div class="knob"></div></div>
+          </div>
+        </div>` : `
+        <div class="field">
+          <label>Anzahl Runden</label>
+          <input class="input" type="number" min="1" max="30" id="roundsInput" value="${d.rounds}">
+        </div>
+        <div class="banner-info">Bei ungerader Spielerzahl setzt die App reihum jemanden pro Runde aus — fair verteilt über das ganze Turnier.</div>
+        `}` : `
+        <div class="banner-info">Die Paarungen für Runde 1 werden zufällig ausgelost, sobald du den Turnierbaum erstellst. Bei ungerader Teamzahl bekommen einzelne Teams ein Freilos.</div>
+        `}
         ${state.createError ? `<div class="banner-error">${esc(state.createError)}</div>` : ""}
-        <button class="btn btn-primary" data-action="toCreateTeams">Weiter · Teams eintragen</button>
+        <button class="btn btn-primary" data-action="toCreateTeams">Weiter · ${d.type==='liga' && d.ligaMode==='individual' ? 'Spieler eintragen' : 'Teams eintragen'}</button>
       </div>
     </div>`;
   }
 
-  // ---------- Create: step 2 (teams) ----------
+  // ---------- Create: step 2 (teams / players) ----------
   function viewCreateTeams(){
     const d = ensureDraft();
+    const individual = d.type==='liga' && d.ligaMode==='individual';
+
+    if(individual){
+      const rows = d.players.map((p,idx)=>`
+        <div class="team-row">
+          <div class="team-avatar">${idx+1}</div>
+          <div class="t-info"><div class="t-name">${esc(p.name)}</div></div>
+          <button class="icon-btn" data-action="removePlayer" data-idx="${idx}">✕</button>
+        </div>`).join("");
+      return `
+      <div class="topbar">
+        <div class="back-btn" data-action="goCreate">←</div>
+        <div><h1>Spieler:innen</h1><div class="sub">Schritt 2 von 2 · mind. 4 Spieler:innen</div></div>
+      </div>
+      <div class="screen" style="padding-top:6px;">
+        <div class="stack">
+          ${rows}
+          <div class="card">
+            <div class="stack">
+              <div class="field">
+                <label>Name</label>
+                <input class="input" id="newPlayerName" placeholder="z. B. Mia Schmidt">
+              </div>
+              <button class="btn btn-secondary" data-action="addPlayer">+ Spieler:in hinzufügen</button>
+            </div>
+          </div>
+          ${state.createError ? `<div class="banner-error">${esc(state.createError)}</div>` : ""}
+          <div class="banner-info">Sobald die Runden erstellt sind, können keine Spieler:innen mehr ergänzt werden.</div>
+          <button class="btn btn-primary" data-action="startTournament" ${d.players.length<4?"disabled":""}>Runden auslosen &amp; Turnier starten</button>
+        </div>
+      </div>`;
+    }
+
+    const min = d.type==='ko' ? 2 : 3;
     const teamRows = d.teams.map((team,idx)=>`
       <div class="team-row">
         <div class="team-avatar">${idx+1}</div>
@@ -600,7 +857,7 @@
     return `
     <div class="topbar">
       <div class="back-btn" data-action="goCreate">←</div>
-      <div><h1>Teams</h1><div class="sub">Schritt 2 von 2 · mind. 3 Teams</div></div>
+      <div><h1>Teams</h1><div class="sub">Schritt 2 von 2 · mind. ${min} Teams</div></div>
     </div>
     <div class="screen" style="padding-top:6px;">
       <div class="stack">
@@ -625,8 +882,8 @@
           </div>
         </div>
         ${state.createError ? `<div class="banner-error">${esc(state.createError)}</div>` : ""}
-        <div class="banner-info">Sobald der Spielplan erstellt ist, können keine Teams mehr ergänzt werden.</div>
-        <button class="btn btn-primary" data-action="startTournament" ${d.teams.length<3?"disabled":""}>Spielplan erstellen &amp; Turnier starten</button>
+        <div class="banner-info">${d.type==='ko' ? 'Sobald der Turnierbaum ausgelost ist, können keine Teams mehr ergänzt werden.' : 'Sobald der Spielplan erstellt ist, können keine Teams mehr ergänzt werden.'}</div>
+        <button class="btn btn-primary" data-action="startTournament" ${d.teams.length<min?"disabled":""}>${d.type==='ko' ? 'Turnierbaum auslosen & Turnier starten' : 'Spielplan erstellen & Turnier starten'}</button>
       </div>
     </div>`;
   }
@@ -652,72 +909,166 @@
   }
 
   // ---------- Detail ----------
+  function matchCardHtml(t, m, roundIndex){
+    const ev = evaluateMatch(m);
+    const editable = canEditMatch(t, m);
+    const nameA = sideLabel(t, m, "A");
+    const nameB = sideLabel(t, m, "B");
+    const pending = !m.pairA && !m.bye && (m.teamAId==null || m.teamBId==null);
+    let winA, winB;
+    if(m.bye){ winA = !!m.teamAId; winB = !!m.teamBId; }
+    else { winA = ev.winnerSide==="A"; winB = ev.winnerSide==="B"; }
+
+    const setsHtml = m.sets.length ? `<div class="set-scores">${m.sets.map(s=>`<span class="set-chip">${s.a}:${s.b}${s.superTiebreak?" (STB)":""}</span>`).join("")}</div>` : "";
+    const roundAttr = roundIndex!=null ? ` data-round="${roundIndex}"` : "";
+
+    let actionHtml;
+    if(m.bye){
+      actionHtml = `<span class="bye-badge">Freilos</span>`;
+    } else if(pending){
+      actionHtml = `<span class="status-text">Wartet auf vorherige Runde</span>`;
+    } else if(editable){
+      actionHtml = `<button class="btn btn-secondary btn-sm" data-action="openScore" data-match="${m.id}"${roundAttr}>${m.sets.length ? "Ergebnis bearbeiten" : "Ergebnis eintragen"}</button>`;
+    } else if(m.sets.length){
+      actionHtml = "";
+    } else {
+      actionHtml = `<span class="status-text">Nur Team oder Turnierleiter</span>`;
+    }
+
+    let statusText;
+    if(m.bye) statusText = esc((winA?nameA:nameB)) + " kommt kampflos weiter";
+    else if(pending) statusText = "Ausstehend";
+    else statusText = ev.completed ? "Beendet" : (m.sets.length ? "Läuft" : "Ausstehend");
+
+    return `
+    <div class="match-card" style="margin-bottom:12px;">
+      <div class="match-teams">
+        <div class="match-team ${winA?'win':''}">${esc(nameA)}</div>
+        <div class="vs-net">VS</div>
+        <div class="match-team ${winB?'win':''}" style="text-align:right;">${esc(nameB)}</div>
+      </div>
+      ${setsHtml}
+      <div class="match-status-row">
+        <span class="status-text">${statusText}</span>
+        ${actionHtml}
+      </div>
+    </div>`;
+  }
+
+  function renderTeamStandings(t){
+    const standings = computeStandings(t);
+    return `
+    <table class="standings">
+      <thead><tr>
+        <th class="left">Team</th><th>Sp</th><th>S</th><th>N</th><th>Sätze</th><th>Spiele</th><th>Pkt</th>
+      </tr></thead>
+      <tbody>
+        ${standings.map((r,i)=>`
+          <tr>
+            <td class="left"><span class="rank">${i+1}</span>&nbsp; ${esc(r.team.name)}</td>
+            <td>${r.played}</td>
+            <td>${r.wins}</td>
+            <td>${r.losses}</td>
+            <td class="mono">${r.setsW}:${r.setsL}</td>
+            <td class="mono">${r.gamesW}:${r.gamesL}</td>
+            <td class="pts">${r.points}</td>
+          </tr>`).join("")}
+      </tbody>
+    </table>`;
+  }
+
+  function renderTeamMatches(t){
+    if(t.rueckrunde){
+      const hin = t.matches.filter(m=>m.leg!=="Rueck");
+      const rueck = t.matches.filter(m=>m.leg==="Rueck");
+      return `<div class="leg-badge">Hinrunde</div>${hin.map(m=>matchCardHtml(t,m,null)).join("")}<div class="leg-badge">Rückrunde</div>${rueck.map(m=>matchCardHtml(t,m,null)).join("")}`;
+    }
+    const html = t.matches.map(m=>matchCardHtml(t,m,null)).join("");
+    return html || `<div class="empty">Keine Spiele.</div>`;
+  }
+
+  function renderIndividualStandings(t){
+    const rows = computeIndividualStandings(t);
+    return `
+    <table class="standings">
+      <thead><tr><th class="left">Spieler:in</th><th>Runden</th><th>Siege</th><th>Pkt</th></tr></thead>
+      <tbody>
+        ${rows.map((r,i)=>`
+          <tr>
+            <td class="left"><span class="rank">${i+1}</span>&nbsp; ${esc(r.player.name)}</td>
+            <td>${r.played}</td>
+            <td>${r.wins}</td>
+            <td class="pts">${r.points}</td>
+          </tr>`).join("")}
+      </tbody>
+    </table>`;
+  }
+
+  function renderIndividualRounds(t){
+    if(!t.ligaRounds.length) return `<div class="empty">Keine Runden.</div>`;
+    return t.ligaRounds.map(rd=>{
+      const sitNames = rd.sitOut.map(pid=>playerName(t,pid)).join(", ");
+      const matches = rd.matches.map(m=>matchCardHtml(t,m,rd.index)).join("");
+      return `<div class="leg-badge">Runde ${rd.index+1}${rd.sitOut.length ? " · Pause: "+esc(sitNames) : ""}</div>${matches}`;
+    }).join("");
+  }
+
+  function renderKOBracket(t){
+    if(!t.matches.length) return `<div class="empty">Kein Turnierbaum.</div>`;
+    const maxRound = Math.max(...t.matches.map(m=>m.roundIndex));
+    const totalRounds = maxRound+1;
+    let html = "";
+    if(t.champion){
+      html += `<div class="champion-banner">🏆 Turniersieger: ${esc(teamName(t,t.champion))}</div>`;
+    }
+    for(let r=0;r<=maxRound;r++){
+      const matches = t.matches.filter(m=>m.roundIndex===r).sort((a,b)=>a.slotIndex-b.slotIndex);
+      html += `<div class="leg-badge">${esc(roundName(r,totalRounds))}</div>`;
+      html += matches.map(m=>matchCardHtml(t,m,null)).join("");
+    }
+    return html;
+  }
+
   function viewDetail(){
     const t = state.current;
     const org = isOrganizer(t);
     const mem = myMembership(t);
-    const standings = computeStandings(t);
+    const isIndividual = t.type==="liga" && t.ligaMode==="individual";
+    const isKO = t.type==="ko";
 
-    let tabContent = "";
-    if(!t.started){
-      tabContent = `<div class="empty"><span class="ball-icon">📋</span>Der Spielplan wurde noch nicht erstellt.</div>`;
-    } else if(state.tab==="table"){
-      tabContent = `
-      <table class="standings">
-        <thead><tr>
-          <th class="left">Team</th><th>Sp</th><th>S</th><th>N</th><th>Sätze</th><th>Spiele</th><th>Pkt</th>
-        </tr></thead>
-        <tbody>
-          ${standings.map((r,i)=>`
-            <tr>
-              <td class="left"><span class="rank">${i+1}</span>&nbsp; ${esc(r.team.name)}</td>
-              <td>${r.played}</td>
-              <td>${r.wins}</td>
-              <td>${r.losses}</td>
-              <td class="mono">${r.setsW}:${r.setsL}</td>
-              <td class="mono">${r.gamesW}:${r.gamesL}</td>
-              <td class="pts">${r.points}</td>
-            </tr>`).join("")}
-        </tbody>
-      </table>`;
-    } else {
-      tabContent = t.matches.map(m=>{
-        const ev = evaluateMatch(m);
-        const editable = canEditMatch(t, m);
-        const setsHtml = m.sets.length ? `<div class="set-scores">${m.sets.map(s=>`<span class="set-chip">${s.a}:${s.b}${s.superTiebreak?" (STB)":""}</span>`).join("")}</div>` : "";
-        return `
-        <div class="match-card" style="margin-bottom:12px;">
-          <div class="match-teams">
-            <div class="match-team ${ev.winnerId===m.teamAId?'win':''}">${esc(teamName(t,m.teamAId))}</div>
-            <div class="vs-net">VS</div>
-            <div class="match-team ${ev.winnerId===m.teamBId?'win':''}" style="text-align:right;">${esc(teamName(t,m.teamBId))}</div>
-          </div>
-          ${setsHtml}
-          <div class="match-status-row">
-            <span class="status-text">${ev.completed ? "Beendet" : (m.sets.length ? "Läuft" : "Ausstehend")}</span>
-            ${editable ? `<button class="btn btn-secondary btn-sm" data-action="openScore" data-match="${m.id}">${m.sets.length ? "Ergebnis bearbeiten" : "Ergebnis eintragen"}</button>` : (m.sets.length ? "" : `<span class="status-text">Nur Team oder Turnierleiter</span>`)}
-          </div>
-        </div>`;
-      }).join("");
-      if(!tabContent) tabContent = `<div class="empty">Keine Spiele.</div>`;
+    let subtitleEntity = "Zuschauer";
+    if(org) subtitleEntity = "Du bist Turnierleiter";
+    else if(mem && mem.teamId){
+      subtitleEntity = isIndividual ? ("Spieler:in: " + playerName(t, mem.teamId)) : ("Team: " + teamName(t, mem.teamId));
     }
+
+    let body;
+    if(isKO){
+      body = renderKOBracket(t);
+    } else if(isIndividual){
+      body = state.tab==="table" ? renderIndividualStandings(t) : renderIndividualRounds(t);
+    } else {
+      body = state.tab==="table" ? renderTeamStandings(t) : renderTeamMatches(t);
+    }
+
+    const showTabs = !isKO;
 
     return `
     <div class="topbar">
       <div class="back-btn" data-action="goHome">←</div>
       <div>
         <h1>${esc(t.name)}</h1>
-        <div class="sub">${org ? "Du bist Turnierleiter" : (mem && mem.teamId ? "Team: " + esc(teamName(t, mem.teamId)) : "Zuschauer")} · <span class="live-dot"></span> live</div>
+        <div class="sub">${esc(subtitleEntity)} · <span class="live-dot"></span> live</div>
       </div>
       <button class="icon-btn" style="font-size:22px;" data-action="openInvite" title="Einladen">＋👤</button>
     </div>
     <div class="screen" style="padding-top:6px;">
-      ${t.started ? `
+      ${showTabs ? `
       <div class="tabs">
         <div class="tab ${state.tab==='table'?'active':''}" data-action="switchTab" data-tab="table">Tabelle</div>
-        <div class="tab ${state.tab==='matches'?'active':''}" data-action="switchTab" data-tab="matches">Spiele</div>
+        <div class="tab ${state.tab==='matches'?'active':''}" data-action="switchTab" data-tab="matches">${isIndividual?'Runden':'Spiele'}</div>
       </div>` : ""}
-      ${tabContent}
+      ${body}
     </div>`;
   }
 
@@ -750,29 +1101,37 @@
 
   function modalJoinTeam(){
     const t = state.modalData.tournament;
-    const teams = t.teams.map(team=>`
-      <div class="radio-team" data-action="chooseTeam" data-team="${team.id}">
-        <div class="team-avatar">${esc(team.name[0]||"?")}</div>
-        <div class="t-info"><div class="t-name">${esc(team.name)}</div><div class="t-players">${[team.p1,team.p2].filter(Boolean).map(esc).join(" & ")||"—"}</div></div>
+    const isIndividual = t.type==="liga" && t.ligaMode==="individual";
+    const entities = entityList(t).map(en=>`
+      <div class="radio-team" data-action="chooseTeam" data-team="${en.id}">
+        <div class="team-avatar">${esc((en.name[0]||"?").toUpperCase())}</div>
+        <div class="t-info"><div class="t-name">${esc(en.name)}</div>${en.sub ? `<div class="t-players">${esc(en.sub)}</div>` : ""}</div>
       </div>`).join("");
     return `
     <div class="modal-overlay" data-action="closeModalBg">
       <div class="modal" onclick="event.stopPropagation()">
         <div class="modal-handle"></div>
         <h2>Willkommen bei ${esc(t.name)}</h2>
-        <div class="modal-sub">Zu welchem Team gehörst du? Als Teammitglied kannst du eure Ergebnisse eintragen.</div>
-        ${teams}
+        <div class="modal-sub">${isIndividual ? "Wer bist du? So kannst du deine eigenen Ergebnisse eintragen." : "Zu welchem Team gehörst du? Als Teammitglied kannst du eure Ergebnisse eintragen."}</div>
+        ${entities}
         <div class="radio-team" data-action="chooseTeam" data-team="">
           <div class="team-avatar">👁</div>
-          <div class="t-info"><div class="t-name">Nur zuschauen</div><div class="t-players">Kein Team, nur Tabelle ansehen</div></div>
+          <div class="t-info"><div class="t-name">Nur zuschauen</div><div class="t-players">Kein Anspruch, nur Tabelle ansehen</div></div>
         </div>
       </div>
     </div>`;
   }
 
+  function findModalMatch(){
+    const t = state.current;
+    const ri = state.modalData.roundIndex;
+    if(ri!=null) return t.ligaRounds[ri].matches.find(x=>x.id===state.modalData.matchId);
+    return t.matches.find(x=>x.id===state.modalData.matchId);
+  }
+
   function modalScore(){
     const t = state.current;
-    const m = t.matches.find(x=>x.id===state.modalData.matchId);
+    const m = findModalMatch();
     const s = state.modalData.setsInput || [{a:"",b:""},{a:"",b:""},{a:"",b:""}];
     const superOn = !!state.modalData.superTB;
     return `
@@ -780,7 +1139,7 @@
       <div class="modal" onclick="event.stopPropagation()">
         <div class="modal-handle"></div>
         <h2>Ergebnis eintragen</h2>
-        <div class="modal-sub">${esc(teamName(t,m.teamAId))} vs ${esc(teamName(t,m.teamBId))}</div>
+        <div class="modal-sub">${esc(sideLabel(t,m,"A"))} vs ${esc(sideLabel(t,m,"B"))}</div>
         <div class="stack">
           ${[0,1].map(i=>`
             <div class="set-entry">
@@ -833,13 +1192,25 @@
       return goHome();
     }
     if(action==="goHome") return goHome();
-    if(action==="goCreate"){ state.draft = { name:"", type:"liga", teams:[] }; state.createError=""; state.view="create"; return render(); }
+    if(action==="goCreate"){ state.draft = { name:"", type:"liga", ligaMode:"teams", rueckrunde:false, rounds:6, teams:[], players:[] }; state.createError=""; state.view="create"; return render(); }
     if(action==="goJoin"){ state.joinCode=""; state.joinError=""; state.view="join"; return render(); }
+
+    if(action==="selectType"){ state.draft.type = el.dataset.type; return render(); }
+    if(action==="selectLigaMode"){ state.draft.ligaMode = el.dataset.mode; return render(); }
+    if(action==="toggleRueckrunde"){ state.draft.rueckrunde = !state.draft.rueckrunde; return render(); }
 
     if(action==="toCreateTeams"){
       const name = document.getElementById("tournNameInput").value.trim();
       if(!name){ state.createError = "Bitte gib einen Turniernamen ein."; return render(); }
-      state.draft.name = name; state.createError="";
+      state.draft.name = name;
+      if(state.draft.type==="liga" && state.draft.ligaMode==="individual"){
+        const roundsEl = document.getElementById("roundsInput");
+        if(roundsEl){
+          const rv = parseInt(roundsEl.value,10);
+          state.draft.rounds = (!isNaN(rv) && rv>0) ? Math.min(rv,30) : 6;
+        }
+      }
+      state.createError="";
       state.view = "createTeams"; return render();
     }
 
@@ -857,22 +1228,61 @@
       state.draft.teams.splice(idx,1);
       return render();
     }
+    if(action==="addPlayer"){
+      const name = document.getElementById("newPlayerName").value.trim();
+      if(!name){ state.createError = "Bitte gib einen Namen ein."; return render(); }
+      state.draft.players.push({ id: uid("p"), name });
+      state.createError = "";
+      return render();
+    }
+    if(action==="removePlayer"){
+      const idx = parseInt(el.dataset.idx,10);
+      state.draft.players.splice(idx,1);
+      return render();
+    }
+
     if(action==="startTournament"){
       const d = state.draft;
-      if(d.teams.length<3) return;
       const code = genCode();
       const t = {
         code,
         name: d.name,
-        type: "liga",
+        type: d.type,
         organizerId: state.identity.id,
         organizerName: state.identity.name,
-        teams: d.teams,
+        teams: [],
+        players: [],
         members: [{ userId: state.identity.id, name: state.identity.name, teamId: null }],
-        matches: generateRoundRobin(d.teams),
+        matches: [],
+        ligaRounds: [],
         started: true,
         createdAt: Date.now()
       };
+
+      if(d.type==="liga"){
+        t.ligaMode = d.ligaMode;
+        if(d.ligaMode==="teams"){
+          if(d.teams.length<3) return;
+          t.teams = d.teams;
+          t.rueckrunde = !!d.rueckrunde;
+          let matches = generateRoundRobin(d.teams, "Hin");
+          if(t.rueckrunde){
+            matches = matches.concat(generateRoundRobin(d.teams, "Rueck").map(m=>({ ...m, teamAId:m.teamBId, teamBId:m.teamAId })));
+          }
+          t.matches = matches;
+        } else {
+          if(d.players.length<4) return;
+          t.players = d.players;
+          t.rounds = d.rounds || 6;
+          t.ligaRounds = generateAmericanoRounds(d.players, t.rounds);
+        }
+      } else if(d.type==="ko"){
+        if(d.teams.length<2) return;
+        t.teams = d.teams;
+        t.matches = buildKOBracket(d.teams);
+        propagateKO(t);
+      }
+
       await saveTournament(t);
       await addMyCode(code);
       state.draft = null;
@@ -891,7 +1301,8 @@
         await saveTournament(t);
       }
       await addMyCode(code);
-      if(!mem.teamId && t.teams.length){
+      const entities = entityList(t);
+      if(!mem.teamId && entities.length){
         state.modal = "jointeam";
         state.modalData = { tournament: t };
         state.current = t; state.currentCode = code;
@@ -934,10 +1345,11 @@
 
     if(action==="openScore"){
       const t = state.current;
-      const m = t.matches.find(x=>x.id===el.dataset.match);
+      const roundIndex = (el.dataset.round!==undefined && el.dataset.round!=="") ? parseInt(el.dataset.round,10) : null;
+      const m = roundIndex!=null ? t.ligaRounds[roundIndex].matches.find(x=>x.id===el.dataset.match) : t.matches.find(x=>x.id===el.dataset.match);
       const setsInput = [0,1,2].map(i=> m.sets[i] ? { a:m.sets[i].a, b:m.sets[i].b } : { a:"", b:"" });
       state.modal = "score";
-      state.modalData = { matchId: m.id, setsInput, superTB: !!(m.sets[2] && m.sets[2].superTiebreak), error:"" };
+      state.modalData = { matchId: m.id, roundIndex, setsInput, superTB: !!(m.sets[2] && m.sets[2].superTiebreak), error:"" };
       return render();
     }
     if(action==="toggleSuper"){
@@ -964,10 +1376,9 @@
       }
       if(sets.length===0){ state.modalData.error = "Bitte mindestens einen Satz eintragen."; return render(); }
       const t = state.current;
-      const m = t.matches.find(x=>x.id===state.modalData.matchId);
+      const m = findModalMatch();
       m.sets = sets;
-      const ev = evaluateMatch(m);
-      m.completed = ev.completed;
+      if(t.type==="ko") propagateKO(t);
       await saveTournament(t);
       state.modal = null; state.modalData = {};
       return render();
