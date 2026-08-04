@@ -129,12 +129,14 @@
   }
   .empty .ball-icon{font-size:34px; margin-bottom:10px; display:block;}
   .tourn-card{
-    background:var(--panel); border-radius:var(--radius); padding:16px;
-    border-left:4px solid var(--ball); cursor:pointer;
+    background:var(--panel); border-radius:var(--radius); padding:16px 44px 16px 16px;
+    border-left:4px solid var(--ball); cursor:pointer; position:relative;
   }
   .tourn-card:active{background:var(--panel-2);}
   .tourn-card .name{font-family:'Bebas Neue'; font-size:22px; letter-spacing:0.4px;}
   .tourn-card .meta{font-size:12px; color:var(--text-soft); margin-top:4px; display:flex; gap:10px; flex-wrap:wrap;}
+  .tourn-card .delete-icon{position:absolute; top:10px; right:8px; font-size:16px; padding:6px; color:var(--text-soft);}
+  .tourn-card .delete-icon:active{color:var(--coral);}
   .pill{
     display:inline-flex; align-items:center; gap:5px;
     background:rgba(207,230,74,0.12); color:var(--ball);
@@ -321,6 +323,18 @@
       return true;
     }catch(e){ console.error("storage set failed", e); return false; }
   }
+  async function sDelete(key, shared){
+    if(shared && db){
+      try{ await db.collection("padel_kv").doc(key).delete(); return true; }
+      catch(e){ console.error("firestore delete failed", e); return false; }
+    }
+    if(NATIVE_STORAGE){
+      try{ await window.storage.delete(key, !!shared); return true; }
+      catch(e){ return false; }
+    }
+    try{ localStorage.removeItem((shared?"shared:":"local:")+key); return true; }
+    catch(e){ return false; }
+  }
 
   function uid(p){ return p + "-" + Math.random().toString(36).slice(2,9); }
   function genCode(){
@@ -356,8 +370,7 @@
     joinLoading: false,
     createError: "",
     pollHandle: null,
-    peerCount: 0,
-    connStatus: "idle" // idle | connecting | connected
+    homeNotice: null
   };
 
   const app = document.getElementById("app");
@@ -676,6 +689,11 @@
     const list = await getMyCodes();
     if(!list.includes(code)){ list.push(code); await sSet("my-codes", list, false); }
   }
+  async function removeMyCode(code){
+    const list = await getMyCodes();
+    const idx = list.indexOf(code);
+    if(idx>=0){ list.splice(idx,1); await sSet("my-codes", list, false); }
+  }
   function normalizeTournament(t){
     if(!t) return t;
     if(!t.type) t.type = "liga";
@@ -705,114 +723,6 @@
     state.myTournaments = results;
   }
 
-  // ---------- Live sync (Trystero, serverless peer-to-peer, kein Account nötig) ----------
-  // Für ein Nachmittags-Turnier: der Turnierleiter "hostet" einen Raum (Code = Trystero-Room-ID)
-  // und hält die maßgebliche Kopie im Speicher/lokal. Beitretende verbinden sich direkt per
-  // WebRTC, bekommen den aktuellen Stand geschickt und senden eigene Änderungen (Team wählen,
-  // Ergebnis eintragen) als Anfrage zurück an den Host, der sie übernimmt und neu verteilt.
-  // Das funktioniert nur, während der Host die App gerade geöffnet hat — für ein Turnier an
-  // einem Nachmittag, wo alle etwa zeitgleich online sind, reicht das ohne eigenen Server.
-  const TRYSTERO_APP_ID = "padel-turnier-manager-v1";
-  let joinRoomFn = null;
-  let room = null;
-  let stateAction = null;
-  let editAction = null;
-  let trysteroRole = null; // "host" | "guest" | null
-
-  async function loadTrystero(){
-    if(joinRoomFn) return joinRoomFn;
-    const mod = await import("https://esm.run/trystero");
-    joinRoomFn = mod.joinRoom;
-    return joinRoomFn;
-  }
-
-  async function leaveRoom(){
-    if(room){ try{ room.leave(); }catch(e){} }
-    room = null; stateAction = null; editAction = null; trysteroRole = null;
-    state.peerCount = 0; state.connStatus = "idle";
-  }
-
-  function broadcastState(){
-    if(room && stateAction && state.current) stateAction.send(state.current);
-  }
-
-  function applyRemoteClaim(t, data){
-    let mem = t.members.find(m=>m.userId===data.userId);
-    if(!mem){ mem = { userId:data.userId, name:data.name, teamId:null }; t.members.push(mem); }
-    mem.name = data.name || mem.name;
-    mem.teamId = data.teamId || null;
-  }
-  function applyRemoteScore(t, data){
-    let m;
-    if(data.roundIndex!=null && t.ligaRounds[data.roundIndex]) m = t.ligaRounds[data.roundIndex].matches.find(x=>x.id===data.matchId);
-    else m = t.matches.find(x=>x.id===data.matchId);
-    if(!m) return;
-    m.sets = data.sets;
-    if(t.type==="ko") propagateKO(t);
-  }
-
-  async function hostRoom(t){
-    await leaveRoom();
-    try{
-      const joinRoom = await loadTrystero();
-      room = joinRoom({ appId: TRYSTERO_APP_ID }, t.code);
-      stateAction = room.makeAction("state");
-      editAction = room.makeAction("edit");
-      trysteroRole = "host";
-      state.connStatus = "connected";
-
-      const updatePeerCount = ()=>{
-        try{ state.peerCount = Object.keys(room.getPeers ? room.getPeers() : {}).length; }catch(e){ state.peerCount = 0; }
-        if(state.view==="detail" && !state.modal) render();
-      };
-      room.onPeerJoin = (peerId)=>{
-        if(state.current) stateAction.send(state.current, { target: peerId });
-        updatePeerCount();
-      };
-      room.onPeerLeave = updatePeerCount;
-
-      editAction.onMessage = async (data)=>{
-        const cur = state.current;
-        if(!cur) return;
-        if(data.type==="claim") applyRemoteClaim(cur, data);
-        else if(data.type==="score") applyRemoteScore(cur, data);
-        await saveTournament(cur);
-        broadcastState();
-        if(state.view==="detail" && !state.modal) render();
-      };
-    }catch(e){
-      console.error("Trystero host setup failed", e);
-    }
-  }
-
-  function guestConnect(code){
-    return new Promise(async (resolve)=>{
-      let settled = false;
-      try{
-        await leaveRoom();
-        const joinRoom = await loadTrystero();
-        room = joinRoom({ appId: TRYSTERO_APP_ID }, code);
-        stateAction = room.makeAction("state");
-        editAction = room.makeAction("edit");
-        trysteroRole = "guest";
-        state.connStatus = "connecting";
-
-        stateAction.onMessage = (data)=>{
-          const t = normalizeTournament(data);
-          state.current = t; state.currentCode = t.code;
-          state.connStatus = "connected";
-          saveTournament(t); // best-effort local cache, so "Meine Turniere" zeigt zuletzt bekannten Stand
-          if(!settled){ settled = true; resolve(t); }
-          else if(state.view==="detail" && !state.modal) render();
-        };
-        setTimeout(()=>{ if(!settled){ settled = true; resolve(null); } }, 8000);
-      }catch(e){
-        console.error("Trystero guest connect failed", e);
-        if(!settled){ settled = true; resolve(null); }
-      }
-    });
-  }
-
   // ---------- Navigation ----------
   function stopPolling(){
     if(state.pollHandle){ clearInterval(state.pollHandle); state.pollHandle = null; }
@@ -821,8 +731,17 @@
     stopPolling();
     state.pollHandle = setInterval(async ()=>{
       if(state.view!=="detail" || !state.currentCode) return;
-      const fresh = await loadTournament(state.currentCode);
-      if(fresh && JSON.stringify(fresh)!==JSON.stringify(state.current)){
+      const code = state.currentCode;
+      const fresh = await loadTournament(code);
+      if(!fresh){
+        if(state.currentCode===code){
+          state.homeNotice = `Das Turnier „${state.current ? state.current.name : ""}" ist nicht mehr verfügbar (wahrscheinlich gelöscht).`;
+          await removeMyCode(code);
+          return goHome();
+        }
+        return;
+      }
+      if(JSON.stringify(fresh)!==JSON.stringify(state.current)){
         state.current = fresh;
         if(!state.modal) render();
       }
@@ -831,7 +750,6 @@
 
   async function goHome(){
     stopPolling();
-    await leaveRoom();
     state.view = "home"; state.modal=null; state.current=null; state.currentCode=null;
     await refreshMyTournamentsList();
     render();
@@ -843,13 +761,6 @@
     state.current = t; state.currentCode = code; state.view = "detail"; state.tab = "table"; state.modal=null;
     startPolling();
     render();
-    if(isOrganizer(t)){
-      hostRoom(t);
-    } else {
-      guestConnect(code).then(fresh=>{
-        if(fresh && state.currentCode===code && state.view==="detail" && !state.modal) render();
-      });
-    }
   }
 
   // ---------- Render: shell ----------
@@ -894,6 +805,8 @@
   // ---------- Home ----------
   function viewHome(){
     const list = state.myTournaments || [];
+    const notice = state.homeNotice;
+    state.homeNotice = null;
     const items = list.map(t=>{
       const mem = myMembership(t);
       const role = isOrganizer(t) ? "Turnierleiter" : (mem && mem.teamId ? "Spieler" : "Zuschauer");
@@ -901,6 +814,7 @@
       const typeLabel = t.type==="ko" ? "K.-o.-System" : (t.ligaMode==="individual" ? "Liga · ohne feste Teams" : "Liga");
       return `
       <div class="tourn-card" data-action="openDetail" data-code="${esc(t.code)}">
+        <button class="icon-btn delete-icon" data-action="deleteTournament" data-code="${esc(t.code)}" onclick="event.stopPropagation()">🗑</button>
         <div class="name">${esc(t.name)}</div>
         <div class="meta">
           <span class="pill">${esc(typeLabel)}</span>
@@ -919,7 +833,8 @@
     </div>
     <div class="screen" style="padding-top:6px;">
       <div class="hero-line"></div>
-      ${!window.__PADEL_SYNCED__ ? `<div class="banner-info" style="margin-bottom:16px;">Hinweis: Einladungen funktionieren direkt von Gerät zu Gerät (kein Account nötig) — dafür muss der/die Turnierleiter:in die App während des Turniers geöffnet halten. Für dauerhafte Speicherung über mehrere Tage kannst du optional firebase-config.js einrichten.</div>` : ""}
+      ${notice ? `<div class="banner-error" style="margin-bottom:16px;">${esc(notice)}</div>` : ""}
+      ${!window.__PADEL_SYNCED__ ? `<div class="banner-info" style="margin-bottom:16px;">Hinweis: Cloud-Speicher ist noch nicht eingerichtet — Turniere sind aktuell nur auf diesem Gerät sichtbar, Einladungen per Code funktionieren nicht geräteübergreifend. Trage deine Firebase-Konfiguration in firebase-config.js ein, damit alle jederzeit beitreten können.</div>` : ""}
       <div class="section-title">Meine Turniere</div>
       ${ list.length ? `<div class="stack">${items}</div>` : `
         <div class="empty">
@@ -1259,16 +1174,12 @@
 
     const showTabs = !isKO;
 
-    let connLabel;
-    if(org) connLabel = state.peerCount>0 ? `<span class="live-dot"></span> ${state.peerCount} verbunden` : `<span style="opacity:0.5;">● wartet auf Mitspieler</span>`;
-    else connLabel = state.connStatus==="connected" ? `<span class="live-dot"></span> live` : `<span style="opacity:0.5;">● verbinde…</span>`;
-
     return `
     <div class="topbar">
       <div class="back-btn" data-action="goHome">←</div>
       <div>
         <h1>${esc(t.name)}</h1>
-        <div class="sub">${esc(subtitleEntity)} · ${connLabel}</div>
+        <div class="sub">${esc(subtitleEntity)} · <span class="live-dot"></span> live</div>
       </div>
       <button class="icon-btn" style="font-size:22px;" data-action="openInvite" title="Einladen">＋👤</button>
     </div>
@@ -1279,6 +1190,7 @@
         <div class="tab ${state.tab==='matches'?'active':''}" data-action="switchTab" data-tab="matches">${isIndividual?'Runden':'Spiele'}</div>
       </div>` : ""}
       ${body}
+      <button class="btn btn-danger" style="margin-top:26px;" data-action="deleteTournament" data-code="${esc(t.code)}">${org ? "🗑 Turnier löschen" : "Turnier aus meiner Liste entfernen"}</button>
     </div>`;
   }
 
@@ -1287,7 +1199,26 @@
     if(state.modal==="invite") return modalInvite();
     if(state.modal==="score") return modalScore();
     if(state.modal==="jointeam") return modalJoinTeam();
+    if(state.modal==="deleteConfirm") return modalDeleteConfirm();
     return "";
+  }
+
+  function modalDeleteConfirm(){
+    const { name, isOrg } = state.modalData;
+    return `
+    <div class="modal-overlay" data-action="closeModalBg">
+      <div class="modal" onclick="event.stopPropagation()">
+        <div class="modal-handle"></div>
+        <h2>${isOrg ? "Turnier löschen?" : "Turnier entfernen?"}</h2>
+        <div class="modal-sub">${isOrg
+          ? `„${esc(name)}" wird für alle endgültig gelöscht, inklusive aller Ergebnisse. Verbundene Mitspieler:innen werden informiert. Das kann nicht rückgängig gemacht werden.`
+          : `„${esc(name)}" wird nur aus deiner eigenen Übersicht entfernt. Für den Turnierleiter und alle anderen bleibt es bestehen — du kannst mit dem Code jederzeit wieder beitreten.`}</div>
+        <div class="stack">
+          <button class="btn btn-danger" style="border:1px solid var(--coral); background:rgba(228,87,46,0.12);" data-action="confirmDelete">${isOrg ? "Endgültig löschen" : "Entfernen"}</button>
+          <button class="btn btn-ghost" data-action="closeModal">Abbrechen</button>
+        </div>
+      </div>
+    </div>`;
   }
 
   function modalInvite(){
@@ -1511,28 +1442,58 @@
       if(!code){ state.joinError="Bitte Code eingeben."; return render(); }
       state.joinLoading = true; state.joinError = "";
       render();
-      const t = await guestConnect(code);
+      const t = await loadTournament(code);
       state.joinLoading = false;
       if(!t){
-        state.joinError = "Turnier nicht gefunden. Der Beitritt funktioniert nur, während der Turnierleiter die App gerade geöffnet hat — bitte kurz nachfragen und erneut versuchen.";
+        state.joinError = "Kein Turnier mit diesem Code gefunden.";
         return render();
       }
+      let mem = t.members.find(m=>m.userId===state.identity.id);
+      if(!mem){
+        mem = { userId: state.identity.id, name: state.identity.name, teamId: null };
+        t.members.push(mem);
+        await saveTournament(t);
+      }
       await addMyCode(code);
-      if(editAction) editAction.send({ type:"claim", userId: state.identity.id, name: state.identity.name, teamId: null });
-      const mem = t.members.find(m=>m.userId===state.identity.id);
       const entities = entityList(t);
-      if((!mem || !mem.teamId) && entities.length){
+      if(!mem.teamId && entities.length){
         state.modal = "jointeam";
         state.modalData = { tournament: t };
         state.current = t; state.currentCode = code;
         state.view = "detail"; state.tab="table";
+        startPolling();
         return render();
       }
-      state.current = t; state.currentCode = code; state.view = "detail"; state.tab = "table"; state.modal = null;
-      return render();
+      return openDetail(code);
     }
 
     if(action==="openDetail") return openDetail(el.dataset.code);
+
+    if(action==="deleteTournament"){
+      const code = el.dataset.code;
+      const cached = (state.myTournaments||[]).find(x=>x.code===code);
+      const t = (state.current && state.current.code===code) ? state.current : cached;
+      const isOrg = t ? isOrganizer(t) : false;
+      const name = t ? t.name : code;
+      state.modal = "deleteConfirm";
+      state.modalData = { code, isOrg, name };
+      return render();
+    }
+    if(action==="confirmDelete"){
+      const { code, isOrg } = state.modalData;
+      if(isOrg){
+        await sDelete("tournament:"+code, true);
+      }
+      await removeMyCode(code);
+      if(state.currentCode===code){
+        stopPolling();
+        state.modal = null; state.modalData = {};
+        return goHome();
+      }
+      state.modal = null; state.modalData = {};
+      await refreshMyTournamentsList();
+      return render();
+    }
 
     if(action==="switchTab"){ state.tab = el.dataset.tab; return render(); }
 
@@ -1555,17 +1516,9 @@
     if(action==="chooseTeam"){
       const teamId = el.dataset.team || null;
       const t = state.current;
-      if(isOrganizer(t)){
-        const mem = t.members.find(m=>m.userId===state.identity.id);
-        if(mem) mem.teamId = teamId;
-        await saveTournament(t);
-        broadcastState();
-      } else {
-        if(editAction) editAction.send({ type:"claim", userId: state.identity.id, name: state.identity.name, teamId });
-        let mem = t.members.find(m=>m.userId===state.identity.id);
-        if(!mem){ mem = { userId: state.identity.id, name: state.identity.name, teamId: null }; t.members.push(mem); }
-        mem.teamId = teamId; // optimistic, host's broadcast will confirm/override shortly
-      }
+      const mem = t.members.find(m=>m.userId===state.identity.id);
+      if(mem) mem.teamId = teamId;
+      await saveTournament(t);
       state.modal = null; state.modalData = {};
       return render();
     }
@@ -1604,17 +1557,9 @@
       if(sets.length===0){ state.modalData.error = "Bitte mindestens einen Satz eintragen."; return render(); }
       const t = state.current;
       const m = findModalMatch();
-      const roundIndex = state.modalData.roundIndex;
-      if(isOrganizer(t)){
-        m.sets = sets;
-        if(t.type==="ko") propagateKO(t);
-        await saveTournament(t);
-        broadcastState();
-      } else {
-        if(editAction) editAction.send({ type:"score", matchId: m.id, roundIndex, sets });
-        m.sets = sets; // optimistic, host's broadcast will confirm/override shortly
-        if(t.type==="ko") propagateKO(t);
-      }
+      m.sets = sets;
+      if(t.type==="ko") propagateKO(t);
+      await saveTournament(t);
       state.modal = null; state.modalData = {};
       return render();
     }
