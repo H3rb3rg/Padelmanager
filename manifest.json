@@ -2,7 +2,7 @@
   "name": "Padel Turnier Manager",
   "short_name": "Padel",
   "description": "Padel-Turniere erstellen, per Code oder QR einladen und die Liga-Tabelle live verfolgen.",
-  "id": "/padel-turnier-manager/",
+  "id": "./",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
