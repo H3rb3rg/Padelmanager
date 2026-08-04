@@ -18,6 +18,12 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+
+<!-- Cloud sync (optional): only activates once firebase-config.js has real keys.
+     Without it, the app still works but tournament data stays on-device only. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/firebase/12.16.0/firebase-app-compat.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/firebase/12.16.0/firebase-firestore-compat.min.js"></script>
+<script src="firebase-config.js"></script>
 <style>
   :root{
     --ink:#0A211D;
@@ -254,14 +260,38 @@
   "use strict";
 
   // ---------- Storage helpers ----------
-  // window.storage only exists inside a Claude.ai artifact. Outside of it (e.g. hosted
-  // on GitHub Pages) we fall back to localStorage so the app still works on one device.
-  // NOTE: localStorage is per-device/per-browser, so "shared" data (tournament join codes)
-  // will NOT sync across different phones without a real backend. See HINWEIS banner in-app.
+  // Three possible backends, tried in this order for "shared" (cross-device) data:
+  //  1. window.storage  — only exists inside a Claude.ai artifact.
+  //  2. Firebase Firestore — used once firebase-config.js has real project keys.
+  //  3. localStorage — always available, but per-device only (no cross-device sync).
+  // Personal data (identity, "my tournaments" list) always stays in localStorage/window.storage,
+  // it's meant to be per-device.
   const NATIVE_STORAGE = (typeof window.storage !== "undefined" && window.storage && typeof window.storage.get === "function");
-  window.__PADEL_SYNCED__ = NATIVE_STORAGE;
+
+  let db = null;
+  const FIREBASE_CONFIGURED = (
+    typeof window.__FIREBASE_CONFIG__ !== "undefined" &&
+    window.__FIREBASE_CONFIG__ &&
+    window.__FIREBASE_CONFIG__.apiKey &&
+    window.__FIREBASE_CONFIG__.apiKey !== "REPLACE_ME" &&
+    typeof firebase !== "undefined"
+  );
+  if(FIREBASE_CONFIGURED){
+    try{
+      firebase.initializeApp(window.__FIREBASE_CONFIG__);
+      db = firebase.firestore();
+    }catch(e){ console.error("Firebase init failed", e); db = null; }
+  }
+
+  window.__PADEL_SYNCED__ = NATIVE_STORAGE || !!db;
 
   async function sGet(key, shared){
+    if(shared && db){
+      try{
+        const snap = await db.collection("padel_kv").doc(key).get();
+        return snap.exists ? snap.data().value : null;
+      }catch(e){ console.error("firestore get failed", e); return null; }
+    }
     if(NATIVE_STORAGE){
       try{
         const r = await window.storage.get(key, !!shared);
@@ -274,6 +304,12 @@
     }catch(e){ return null; }
   }
   async function sSet(key, value, shared){
+    if(shared && db){
+      try{
+        await db.collection("padel_kv").doc(key).set({ value, updatedAt: Date.now() });
+        return true;
+      }catch(e){ console.error("firestore set failed", e); return false; }
+    }
     if(NATIVE_STORAGE){
       try{
         await window.storage.set(key, JSON.stringify(value), !!shared);
@@ -317,8 +353,11 @@
     draft: null,
     joinCode: "",
     joinError: "",
+    joinLoading: false,
     createError: "",
-    pollHandle: null
+    pollHandle: null,
+    peerCount: 0,
+    connStatus: "idle" // idle | connecting | connected
   };
 
   const app = document.getElementById("app");
@@ -666,6 +705,114 @@
     state.myTournaments = results;
   }
 
+  // ---------- Live sync (Trystero, serverless peer-to-peer, kein Account nötig) ----------
+  // Für ein Nachmittags-Turnier: der Turnierleiter "hostet" einen Raum (Code = Trystero-Room-ID)
+  // und hält die maßgebliche Kopie im Speicher/lokal. Beitretende verbinden sich direkt per
+  // WebRTC, bekommen den aktuellen Stand geschickt und senden eigene Änderungen (Team wählen,
+  // Ergebnis eintragen) als Anfrage zurück an den Host, der sie übernimmt und neu verteilt.
+  // Das funktioniert nur, während der Host die App gerade geöffnet hat — für ein Turnier an
+  // einem Nachmittag, wo alle etwa zeitgleich online sind, reicht das ohne eigenen Server.
+  const TRYSTERO_APP_ID = "padel-turnier-manager-v1";
+  let joinRoomFn = null;
+  let room = null;
+  let stateAction = null;
+  let editAction = null;
+  let trysteroRole = null; // "host" | "guest" | null
+
+  async function loadTrystero(){
+    if(joinRoomFn) return joinRoomFn;
+    const mod = await import("https://esm.run/trystero");
+    joinRoomFn = mod.joinRoom;
+    return joinRoomFn;
+  }
+
+  async function leaveRoom(){
+    if(room){ try{ room.leave(); }catch(e){} }
+    room = null; stateAction = null; editAction = null; trysteroRole = null;
+    state.peerCount = 0; state.connStatus = "idle";
+  }
+
+  function broadcastState(){
+    if(room && stateAction && state.current) stateAction.send(state.current);
+  }
+
+  function applyRemoteClaim(t, data){
+    let mem = t.members.find(m=>m.userId===data.userId);
+    if(!mem){ mem = { userId:data.userId, name:data.name, teamId:null }; t.members.push(mem); }
+    mem.name = data.name || mem.name;
+    mem.teamId = data.teamId || null;
+  }
+  function applyRemoteScore(t, data){
+    let m;
+    if(data.roundIndex!=null && t.ligaRounds[data.roundIndex]) m = t.ligaRounds[data.roundIndex].matches.find(x=>x.id===data.matchId);
+    else m = t.matches.find(x=>x.id===data.matchId);
+    if(!m) return;
+    m.sets = data.sets;
+    if(t.type==="ko") propagateKO(t);
+  }
+
+  async function hostRoom(t){
+    await leaveRoom();
+    try{
+      const joinRoom = await loadTrystero();
+      room = joinRoom({ appId: TRYSTERO_APP_ID }, t.code);
+      stateAction = room.makeAction("state");
+      editAction = room.makeAction("edit");
+      trysteroRole = "host";
+      state.connStatus = "connected";
+
+      const updatePeerCount = ()=>{
+        try{ state.peerCount = Object.keys(room.getPeers ? room.getPeers() : {}).length; }catch(e){ state.peerCount = 0; }
+        if(state.view==="detail" && !state.modal) render();
+      };
+      room.onPeerJoin = (peerId)=>{
+        if(state.current) stateAction.send(state.current, { target: peerId });
+        updatePeerCount();
+      };
+      room.onPeerLeave = updatePeerCount;
+
+      editAction.onMessage = async (data)=>{
+        const cur = state.current;
+        if(!cur) return;
+        if(data.type==="claim") applyRemoteClaim(cur, data);
+        else if(data.type==="score") applyRemoteScore(cur, data);
+        await saveTournament(cur);
+        broadcastState();
+        if(state.view==="detail" && !state.modal) render();
+      };
+    }catch(e){
+      console.error("Trystero host setup failed", e);
+    }
+  }
+
+  function guestConnect(code){
+    return new Promise(async (resolve)=>{
+      let settled = false;
+      try{
+        await leaveRoom();
+        const joinRoom = await loadTrystero();
+        room = joinRoom({ appId: TRYSTERO_APP_ID }, code);
+        stateAction = room.makeAction("state");
+        editAction = room.makeAction("edit");
+        trysteroRole = "guest";
+        state.connStatus = "connecting";
+
+        stateAction.onMessage = (data)=>{
+          const t = normalizeTournament(data);
+          state.current = t; state.currentCode = t.code;
+          state.connStatus = "connected";
+          saveTournament(t); // best-effort local cache, so "Meine Turniere" zeigt zuletzt bekannten Stand
+          if(!settled){ settled = true; resolve(t); }
+          else if(state.view==="detail" && !state.modal) render();
+        };
+        setTimeout(()=>{ if(!settled){ settled = true; resolve(null); } }, 8000);
+      }catch(e){
+        console.error("Trystero guest connect failed", e);
+        if(!settled){ settled = true; resolve(null); }
+      }
+    });
+  }
+
   // ---------- Navigation ----------
   function stopPolling(){
     if(state.pollHandle){ clearInterval(state.pollHandle); state.pollHandle = null; }
@@ -684,6 +831,7 @@
 
   async function goHome(){
     stopPolling();
+    await leaveRoom();
     state.view = "home"; state.modal=null; state.current=null; state.currentCode=null;
     await refreshMyTournamentsList();
     render();
@@ -695,6 +843,13 @@
     state.current = t; state.currentCode = code; state.view = "detail"; state.tab = "table"; state.modal=null;
     startPolling();
     render();
+    if(isOrganizer(t)){
+      hostRoom(t);
+    } else {
+      guestConnect(code).then(fresh=>{
+        if(fresh && state.currentCode===code && state.view==="detail" && !state.modal) render();
+      });
+    }
   }
 
   // ---------- Render: shell ----------
@@ -764,7 +919,7 @@
     </div>
     <div class="screen" style="padding-top:6px;">
       <div class="hero-line"></div>
-      ${!window.__PADEL_SYNCED__ ? `<div class="banner-info" style="margin-bottom:16px;">Hinweis: Diese Version speichert Daten nur auf diesem Gerät. Für geräteübergreifende Einladungen brauchst du noch einen kleinen Online-Speicher (z. B. Firebase) im Hintergrund.</div>` : ""}
+      ${!window.__PADEL_SYNCED__ ? `<div class="banner-info" style="margin-bottom:16px;">Hinweis: Einladungen funktionieren direkt von Gerät zu Gerät (kein Account nötig) — dafür muss der/die Turnierleiter:in die App während des Turniers geöffnet halten. Für dauerhafte Speicherung über mehrere Tage kannst du optional firebase-config.js einrichten.</div>` : ""}
       <div class="section-title">Meine Turniere</div>
       ${ list.length ? `<div class="stack">${items}</div>` : `
         <div class="empty">
@@ -942,8 +1097,8 @@
           <input class="input code-input" id="joinCodeInput" maxlength="6" placeholder="ABC123" value="${esc(state.joinCode)}">
         </div>
         ${state.joinError ? `<div class="banner-error">${esc(state.joinError)}</div>` : ""}
-        <button class="btn btn-primary" data-action="submitJoin">Beitreten</button>
-        <div class="banner-info">Der Code steht in der Einladung des Turnierleiters oder im QR-Code — QR einfach mit einer beliebigen Scanner-App auslesen, der Code erscheint als Text zum Eintippen.</div>
+        <button class="btn btn-primary" data-action="submitJoin" ${state.joinLoading?"disabled":""}>${state.joinLoading ? "Verbinde mit Turnierleiter …" : "Beitreten"}</button>
+        <div class="banner-info">Der Code steht in der Einladung des Turnierleiters oder im QR-Code — QR einfach mit einer beliebigen Scanner-App auslesen, der Code erscheint als Text zum Eintippen. Die Verbindung läuft direkt zum Handy des Turnierleiters, das muss die App dafür gerade geöffnet haben.</div>
       </div>
     </div>`;
   }
@@ -1104,12 +1259,16 @@
 
     const showTabs = !isKO;
 
+    let connLabel;
+    if(org) connLabel = state.peerCount>0 ? `<span class="live-dot"></span> ${state.peerCount} verbunden` : `<span style="opacity:0.5;">● wartet auf Mitspieler</span>`;
+    else connLabel = state.connStatus==="connected" ? `<span class="live-dot"></span> live` : `<span style="opacity:0.5;">● verbinde…</span>`;
+
     return `
     <div class="topbar">
       <div class="back-btn" data-action="goHome">←</div>
       <div>
         <h1>${esc(t.name)}</h1>
-        <div class="sub">${esc(subtitleEntity)} · <span class="live-dot"></span> live</div>
+        <div class="sub">${esc(subtitleEntity)} · ${connLabel}</div>
       </div>
       <button class="icon-btn" style="font-size:22px;" data-action="openInvite" title="Einladen">＋👤</button>
     </div>
@@ -1350,25 +1509,27 @@
     if(action==="submitJoin"){
       const code = document.getElementById("joinCodeInput").value.trim().toUpperCase();
       if(!code){ state.joinError="Bitte Code eingeben."; return render(); }
-      const t = await loadTournament(code);
-      if(!t){ state.joinError = "Kein Turnier mit diesem Code gefunden."; return render(); }
-      let mem = t.members.find(m=>m.userId===state.identity.id);
-      if(!mem){
-        mem = { userId: state.identity.id, name: state.identity.name, teamId: null };
-        t.members.push(mem);
-        await saveTournament(t);
+      state.joinLoading = true; state.joinError = "";
+      render();
+      const t = await guestConnect(code);
+      state.joinLoading = false;
+      if(!t){
+        state.joinError = "Turnier nicht gefunden. Der Beitritt funktioniert nur, während der Turnierleiter die App gerade geöffnet hat — bitte kurz nachfragen und erneut versuchen.";
+        return render();
       }
       await addMyCode(code);
+      if(editAction) editAction.send({ type:"claim", userId: state.identity.id, name: state.identity.name, teamId: null });
+      const mem = t.members.find(m=>m.userId===state.identity.id);
       const entities = entityList(t);
-      if(!mem.teamId && entities.length){
+      if((!mem || !mem.teamId) && entities.length){
         state.modal = "jointeam";
         state.modalData = { tournament: t };
         state.current = t; state.currentCode = code;
         state.view = "detail"; state.tab="table";
-        startPolling();
         return render();
       }
-      return openDetail(code);
+      state.current = t; state.currentCode = code; state.view = "detail"; state.tab = "table"; state.modal = null;
+      return render();
     }
 
     if(action==="openDetail") return openDetail(el.dataset.code);
@@ -1394,9 +1555,17 @@
     if(action==="chooseTeam"){
       const teamId = el.dataset.team || null;
       const t = state.current;
-      const mem = t.members.find(m=>m.userId===state.identity.id);
-      if(mem) mem.teamId = teamId;
-      await saveTournament(t);
+      if(isOrganizer(t)){
+        const mem = t.members.find(m=>m.userId===state.identity.id);
+        if(mem) mem.teamId = teamId;
+        await saveTournament(t);
+        broadcastState();
+      } else {
+        if(editAction) editAction.send({ type:"claim", userId: state.identity.id, name: state.identity.name, teamId });
+        let mem = t.members.find(m=>m.userId===state.identity.id);
+        if(!mem){ mem = { userId: state.identity.id, name: state.identity.name, teamId: null }; t.members.push(mem); }
+        mem.teamId = teamId; // optimistic, host's broadcast will confirm/override shortly
+      }
       state.modal = null; state.modalData = {};
       return render();
     }
@@ -1435,9 +1604,17 @@
       if(sets.length===0){ state.modalData.error = "Bitte mindestens einen Satz eintragen."; return render(); }
       const t = state.current;
       const m = findModalMatch();
-      m.sets = sets;
-      if(t.type==="ko") propagateKO(t);
-      await saveTournament(t);
+      const roundIndex = state.modalData.roundIndex;
+      if(isOrganizer(t)){
+        m.sets = sets;
+        if(t.type==="ko") propagateKO(t);
+        await saveTournament(t);
+        broadcastState();
+      } else {
+        if(editAction) editAction.send({ type:"score", matchId: m.id, roundIndex, sets });
+        m.sets = sets; // optimistic, host's broadcast will confirm/override shortly
+        if(t.type==="ko") propagateKO(t);
+      }
       state.modal = null; state.modalData = {};
       return render();
     }
