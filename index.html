@@ -422,20 +422,22 @@
   const app = document.getElementById("app");
 
   // ---------- Domain logic: scoring primitives ----------
-  // Ein Satz entscheidet das Match: bis 6 (2 Spiele Vorsprung), bei 6:6 Tiebreak bis 7.
-  function setWinner(a,b){
+  // Ein Satz entscheidet das Match: bis "target" Spiele (2 Spiele Vorsprung),
+  // bei target:target Tiebreak bis target+1.
+  function setWinner(a,b,target){
+    target = target || 6;
     if(a===b || a==null || b==null || isNaN(a) || isNaN(b)) return null;
     const hi = Math.max(a,b), lo = Math.min(a,b);
-    if(hi===6 && hi-lo>=2) return a>b ? "A":"B";
-    if(hi===7 && (lo===5 || lo===6)) return a>b ? "A":"B";
+    if(hi===target && hi-lo>=2) return a>b ? "A":"B";
+    if(hi===target+1 && (lo===target-1 || lo===target)) return a>b ? "A":"B";
     return null;
   }
 
   // Shape-agnostic: works for team matches, pair (individual) matches and KO matches.
   // match.sets hält genau einen Eintrag {a,b} (oder ist leer, solange noch nicht gespielt).
-  function evaluateMatch(match){
+  function evaluateMatch(match, target){
     const s = (match.sets && match.sets[0]) || null;
-    const w = s ? setWinner(s.a, s.b) : null;
+    const w = s ? setWinner(s.a, s.b, target) : null;
     const winsA = w==="A" ? 1 : 0;
     const winsB = w==="B" ? 1 : 0;
     return { winsA, winsB, winnerSide: w, completed: !!w };
@@ -489,7 +491,7 @@
       rows[team.id] = { team, played:0, wins:0, losses:0, gamesW:0, gamesL:0, points:0 };
     });
     t.matches.forEach(m=>{
-      const ev = evaluateMatch(m);
+      const ev = evaluateMatch(m, t.setTarget);
       if(!ev.completed) return;
       const rA = rows[m.teamAId], rB = rows[m.teamBId];
       if(!rA || !rB) return;
@@ -576,11 +578,11 @@
     t.players.forEach(p=>{ rows[p.id] = { player:p, played:0, wins:0, points:0 }; });
     (t.ligaRounds||[]).forEach(rd=>{
       rd.matches.forEach(m=>{
-        const ev = evaluateMatch(m);
+        const ev = evaluateMatch(m, t.setTarget);
         m.pairA.forEach(pid=>{ if(rows[pid]) rows[pid].played++; });
         m.pairB.forEach(pid=>{ if(rows[pid]) rows[pid].played++; });
         const s = m.sets[0];
-        if(s && setWinner(s.a, s.b)){
+        if(s && setWinner(s.a, s.b, t.setTarget)){
           m.pairA.forEach(pid=>{ if(rows[pid]) rows[pid].points += s.a; });
           m.pairB.forEach(pid=>{ if(rows[pid]) rows[pid].points += s.b; });
         }
@@ -628,14 +630,14 @@
     return matches;
   }
 
-  function koWinnerId(m){
+  function koWinnerId(m, target){
     if(m.bye) return m.winnerId;
-    const ev = evaluateMatch(m);
+    const ev = evaluateMatch(m, target);
     if(ev.winnerSide==="A") return m.teamAId;
     if(ev.winnerSide==="B") return m.teamBId;
     return null;
   }
-  function koCompleted(m){ return m.bye ? true : evaluateMatch(m).completed; }
+  function koCompleted(m, target){ return m.bye ? true : evaluateMatch(m, target).completed; }
 
   function propagateKO(t){
     const matches = t.matches;
@@ -644,12 +646,12 @@
       if(m.roundIndex===0) return;
       const srcA = matches.find(x=>x.id===m.sourceA);
       const srcB = matches.find(x=>x.id===m.sourceB);
-      m.teamAId = (srcA && koCompleted(srcA)) ? koWinnerId(srcA) : null;
-      m.teamBId = (srcB && koCompleted(srcB)) ? koWinnerId(srcB) : null;
+      m.teamAId = (srcA && koCompleted(srcA, t.setTarget)) ? koWinnerId(srcA, t.setTarget) : null;
+      m.teamBId = (srcB && koCompleted(srcB, t.setTarget)) ? koWinnerId(srcB, t.setTarget) : null;
     });
     const maxRound = Math.max(...matches.map(m=>m.roundIndex));
     const final = matches.find(m=>m.roundIndex===maxRound);
-    t.champion = (final && koCompleted(final)) ? koWinnerId(final) : null;
+    t.champion = (final && koCompleted(final, t.setTarget)) ? koWinnerId(final, t.setTarget) : null;
   }
 
   function roundName(r, total){
@@ -733,6 +735,7 @@
     if(!t.players) t.players = [];
     if(!t.matches) t.matches = [];
     if(!t.ligaRounds) t.ligaRounds = [];
+    if(!t.setTarget) t.setTarget = 6;
     return t;
   }
   async function loadTournament(code){
@@ -881,7 +884,7 @@
 
   // ---------- Create: step 1 (name + type) ----------
   function ensureDraft(){
-    if(!state.draft) state.draft = { name:"", type:"liga", ligaMode:"teams", rueckrunde:false, rounds:6, teams:[], players:[] };
+    if(!state.draft) state.draft = { name:"", type:"liga", ligaMode:"teams", rueckrunde:false, rounds:6, setTarget:6, teams:[], players:[] };
     return state.draft;
   }
   function viewCreate(){
@@ -897,6 +900,11 @@
           <label>Turniername</label>
           <input class="input" id="tournNameInput" placeholder="z. B. Sommer Liga 2026" value="${esc(d.name)}">
         </div>
+        <div class="field">
+          <label>Spiele zum Gewinnen eines Satzes</label>
+          <input class="input" type="number" min="3" max="12" id="setTargetInput" value="${d.setTarget}">
+        </div>
+        <div class="banner-info">Ein Satz entscheidet jedes Match: bis zu dieser Zahl (2 Spiele Vorsprung), bei Gleichstand Tiebreak bis eins mehr. Standard ist 6.</div>
         <div class="field">
           <label>Turnierart</label>
           <div class="type-option ${d.type==='liga'?'selected':''}" data-action="selectType" data-type="liga">
@@ -1051,7 +1059,7 @@
 
   // ---------- Detail ----------
   function matchCardHtml(t, m, roundIndex){
-    const ev = evaluateMatch(m);
+    const ev = evaluateMatch(m, t.setTarget);
     const editable = canEditMatch(t, m);
     const nameA = sideLabel(t, m, "A");
     const nameB = sideLabel(t, m, "B");
@@ -1303,12 +1311,13 @@
   function modalScore(){
     const t = state.current;
     const m = findModalMatch();
+    const target = t.setTarget || 6;
     const a = state.modalData.a || 0;
     const b = state.modalData.b || 0;
     const nameA = sideLabel(t,m,"A");
     const nameB = sideLabel(t,m,"B");
-    const winner = setWinner(a,b);
-    const tiebreak = a>=6 && b>=6 && !winner;
+    const winner = setWinner(a,b,target);
+    const tiebreak = a>=target && b>=target && !winner;
     const leadA = a>b, leadB = b>a;
 
     let statusText, statusExtra;
@@ -1326,7 +1335,7 @@
       <div class="modal" onclick="event.stopPropagation()">
         <div class="modal-handle"></div>
         <h2>Ergebnis eintragen</h2>
-        <div class="modal-sub">Ein Satz bis 6 (2 Spiele Vorsprung), bei 6:6 Tiebreak bis 7.</div>
+        <div class="modal-sub">Ein Satz bis ${target} (2 Spiele Vorsprung), bei ${target}:${target} Tiebreak bis ${target+1}.</div>
 
         <div class="court-wrap">
           <div class="court">
@@ -1405,6 +1414,11 @@
       const name = document.getElementById("tournNameInput").value.trim();
       if(!name){ state.createError = "Bitte gib einen Turniernamen ein."; return render(); }
       state.draft.name = name;
+      const targetEl = document.getElementById("setTargetInput");
+      if(targetEl){
+        const tv = parseInt(targetEl.value,10);
+        state.draft.setTarget = (!isNaN(tv) && tv>=3) ? Math.min(tv,12) : 6;
+      }
       if(state.draft.type==="liga" && state.draft.ligaMode==="individual"){
         const roundsEl = document.getElementById("roundsInput");
         if(roundsEl){
@@ -1450,6 +1464,7 @@
         code,
         name: d.name,
         type: d.type,
+        setTarget: d.setTarget || 6,
         organizerId: state.identity.id,
         organizerName: state.identity.name,
         teams: [],
@@ -1597,18 +1612,20 @@
       const team = el.dataset.team;
       const delta = parseInt(el.dataset.delta,10);
       const key = team==="A" ? "a" : "b";
-      state.modalData[key] = Math.max(0, Math.min(7, (state.modalData[key]||0) + delta));
+      const target = (state.current && state.current.setTarget) || 6;
+      state.modalData[key] = Math.max(0, Math.min(target+1, (state.modalData[key]||0) + delta));
       state.modalData.error = "";
       return render();
     }
     if(action==="saveScore"){
+      const t = state.current;
+      const target = t.setTarget || 6;
       const a = state.modalData.a||0, b = state.modalData.b||0;
-      const w = setWinner(a,b);
+      const w = setWinner(a,b,target);
       if(!w){
-        state.modalData.error = "Der Satz ist noch nicht entschieden (bis 6 mit 2 Spielen Vorsprung, oder Tiebreak bis 7).";
+        state.modalData.error = `Der Satz ist noch nicht entschieden (bis ${target} mit 2 Spielen Vorsprung, oder Tiebreak bis ${target+1}).`;
         return render();
       }
-      const t = state.current;
       const m = findModalMatch();
       m.sets = [{ a, b }];
       if(t.type==="ko") propagateKO(t);
