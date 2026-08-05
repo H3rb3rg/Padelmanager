@@ -39,6 +39,9 @@
     --coral:#E4572E;
     --text-soft:#B9CFC7;
     --radius:14px;
+    --pcourt:#0E5FA8;
+    --pcourt-2:#0B4C87;
+    --pcourt-3:#0C3F70;
   }
   *{box-sizing:border-box;}
   html,body{margin:0;padding:0;}
@@ -209,18 +212,61 @@
   .modal-handle{width:40px; height:4px; background:rgba(255,255,255,0.15); border-radius:10px; margin:0 auto 16px auto;}
   .modal h2{font-family:'Bebas Neue'; font-size:24px; margin:0 0 4px 0; letter-spacing:0.4px;}
   .modal .modal-sub{font-size:12.5px; color:var(--text-soft); margin-bottom:16px;}
-  .set-entry{display:flex; align-items:center; gap:10px; margin-bottom:10px;}
-  .set-entry .set-label{width:52px; font-size:11px; color:var(--text-soft); font-weight:700; text-transform:uppercase;}
-  .set-entry input{
-    width:56px; text-align:center; background:var(--ink); border:1px solid rgba(255,255,255,0.15);
-    border-radius:8px; padding:10px 4px; color:var(--paper); font-family:'JetBrains Mono'; font-size:17px; font-weight:700;
-  }
-  .set-entry .colon{color:var(--text-soft); font-weight:700;}
   .toggle-row{display:flex; align-items:center; justify-content:space-between; padding:10px 0; font-size:12.5px; color:var(--text-soft);}
   .switch{width:40px; height:22px; border-radius:100px; background:rgba(255,255,255,0.15); position:relative; cursor:pointer; flex-shrink:0;}
   .switch.on{background:var(--ball);}
   .switch .knob{position:absolute; top:2px; left:2px; width:18px; height:18px; border-radius:50%; background:#fff; transition:left .15s;}
   .switch.on .knob{left:20px; background:#12280F;}
+
+  /* ---- Court score entry ---- */
+  .court-wrap{background:var(--panel); border-radius:16px; padding:12px; border:1px solid rgba(255,255,255,0.07);}
+  .court{
+    position:relative; aspect-ratio:10/15;
+    background:linear-gradient(180deg, var(--pcourt-3) 0%, var(--pcourt) 50%, var(--pcourt-3) 100%);
+    border-radius:10px; border:3px solid var(--paper); overflow:hidden;
+    box-shadow:inset 0 0 40px rgba(0,0,0,0.35);
+  }
+  .court::before{ content:""; position:absolute; inset:6%; border:2px solid rgba(244,242,233,0.85); border-radius:2px; }
+  .court .net{ position:absolute; left:0; right:0; top:50%; height:0; transform:translateY(-50%); border-top:5px dashed rgba(244,242,233,0.95); z-index:5; }
+  .court .service-line{ position:absolute; left:6%; right:6%; height:0; border-top:2px solid rgba(244,242,233,0.85); }
+  .court .service-line.top{ top:28%; }
+  .court .service-line.bottom{ bottom:28%; }
+  .court .center-line{ position:absolute; top:6%; bottom:6%; left:50%; width:0; border-left:2px solid rgba(244,242,233,0.55); }
+  .court .center-line.top-half{ bottom:50%; top:28%; }
+  .court .center-line.bottom-half{ top:50%; bottom:28%; }
+  .court-half{
+    position:absolute; left:0; right:0; height:50%;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:8px; z-index:10; transition:background 0.2s;
+  }
+  .court-half.top{ top:0; }
+  .court-half.bottom{ bottom:0; }
+  .court-half.leading{ background:rgba(207,230,74,0.10); }
+  .court-team-tag{
+    font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.4px; text-align:center;
+    color:var(--paper); background:rgba(10,33,29,0.55); padding:4px 12px; border-radius:100px;
+    max-width:85%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; backdrop-filter:blur(2px);
+  }
+  .court-score-num{
+    font-family:'JetBrains Mono'; font-weight:700; font-size:52px; line-height:1;
+    color:var(--paper); text-shadow:0 2px 10px rgba(0,0,0,0.4); min-width:70px; text-align:center;
+  }
+  .court-half.leading .court-score-num{ color:var(--ball); }
+  .court-stepper{ display:flex; align-items:center; gap:12px; }
+  .court-step-btn{
+    width:40px; height:40px; border-radius:50%; border:none; cursor:pointer;
+    background:rgba(10,33,29,0.55); color:var(--paper); font-size:20px; font-weight:700;
+    display:flex; align-items:center; justify-content:center; backdrop-filter:blur(2px);
+  }
+  .court-step-btn:active{ background:var(--ball); color:#12280F; transform:scale(0.94); }
+  .court-tiebreak-badge{
+    position:absolute; top:8px; left:50%; transform:translateX(-50%); z-index:20;
+    background:var(--coral); color:#2A0D04; font-family:'JetBrains Mono'; font-weight:700;
+    font-size:10px; letter-spacing:0.6px; padding:3px 10px; border-radius:100px;
+  }
+  .court-status-row{ display:flex; align-items:center; justify-content:space-between; margin-top:14px; font-size:12.5px; color:var(--text-soft); }
+  .court-status-row .winner{ color:var(--ball); font-weight:700; }
+
   .code-display{
     text-align:center; font-family:'JetBrains Mono'; font-size:32px; font-weight:700;
     letter-spacing:8px; color:var(--ball); background:var(--ink); border-radius:14px;
@@ -376,30 +422,23 @@
   const app = document.getElementById("app");
 
   // ---------- Domain logic: scoring primitives ----------
-  function setWinner(a,b,isSuper){
+  // Ein Satz entscheidet das Match: bis 6 (2 Spiele Vorsprung), bei 6:6 Tiebreak bis 7.
+  function setWinner(a,b){
     if(a===b || a==null || b==null || isNaN(a) || isNaN(b)) return null;
     const hi = Math.max(a,b), lo = Math.min(a,b);
-    if(isSuper){
-      if(hi>=10 && hi-lo>=2) return a>b ? "A":"B";
-      return null;
-    }
     if(hi===6 && hi-lo>=2) return a>b ? "A":"B";
     if(hi===7 && (lo===5 || lo===6)) return a>b ? "A":"B";
     return null;
   }
 
   // Shape-agnostic: works for team matches, pair (individual) matches and KO matches.
+  // match.sets hält genau einen Eintrag {a,b} (oder ist leer, solange noch nicht gespielt).
   function evaluateMatch(match){
-    let winsA=0, winsB=0;
-    (match.sets||[]).forEach(s=>{
-      const w = setWinner(s.a, s.b, s.superTiebreak);
-      if(w==="A") winsA++;
-      else if(w==="B") winsB++;
-    });
-    let winnerSide = null;
-    if(winsA>=2) winnerSide = "A";
-    else if(winsB>=2) winnerSide = "B";
-    return { winsA, winsB, winnerSide, completed: !!winnerSide };
+    const s = (match.sets && match.sets[0]) || null;
+    const w = s ? setWinner(s.a, s.b) : null;
+    const winsA = w==="A" ? 1 : 0;
+    const winsB = w==="B" ? 1 : 0;
+    return { winsA, winsB, winnerSide: w, completed: !!w };
   }
 
   // ---------- Domain logic: Liga (feste Teams) ----------
@@ -447,29 +486,22 @@
   function computeStandings(t){
     const rows = {};
     t.teams.forEach(team=>{
-      rows[team.id] = { team, played:0, wins:0, losses:0, setsW:0, setsL:0, gamesW:0, gamesL:0, points:0 };
+      rows[team.id] = { team, played:0, wins:0, losses:0, gamesW:0, gamesL:0, points:0 };
     });
     t.matches.forEach(m=>{
       const ev = evaluateMatch(m);
       if(!ev.completed) return;
       const rA = rows[m.teamAId], rB = rows[m.teamBId];
       if(!rA || !rB) return;
+      const s = m.sets[0];
       rA.played++; rB.played++;
-      m.sets.forEach(s=>{
-        const w = setWinner(s.a, s.b, s.superTiebreak);
-        if(!w) return;
-        rA.gamesW += s.a; rA.gamesL += s.b;
-        rB.gamesW += s.b; rB.gamesL += s.a;
-        if(w==="A") rA.setsW++, rB.setsL++;
-        else rB.setsW++, rA.setsL++;
-      });
+      rA.gamesW += s.a; rA.gamesL += s.b;
+      rB.gamesW += s.b; rB.gamesL += s.a;
       if(ev.winnerSide==="A"){ rA.wins++; rA.points+=2; rB.losses++; }
       else if(ev.winnerSide==="B"){ rB.wins++; rB.points+=2; rA.losses++; }
     });
     return Object.values(rows).sort((x,y)=>{
       if(y.points!==x.points) return y.points-x.points;
-      const xd = x.setsW-x.setsL, yd = y.setsW-y.setsL;
-      if(yd!==xd) return yd-xd;
       const xg = x.gamesW-x.gamesL, yg = y.gamesW-y.gamesL;
       return yg-xg;
     });
@@ -547,12 +579,11 @@
         const ev = evaluateMatch(m);
         m.pairA.forEach(pid=>{ if(rows[pid]) rows[pid].played++; });
         m.pairB.forEach(pid=>{ if(rows[pid]) rows[pid].played++; });
-        m.sets.forEach(s=>{
-          const w = setWinner(s.a, s.b, s.superTiebreak);
-          if(!w) return;
+        const s = m.sets[0];
+        if(s && setWinner(s.a, s.b)){
           m.pairA.forEach(pid=>{ if(rows[pid]) rows[pid].points += s.a; });
           m.pairB.forEach(pid=>{ if(rows[pid]) rows[pid].points += s.b; });
-        });
+        }
         if(ev.winnerSide==="A") m.pairA.forEach(pid=>{ if(rows[pid]) rows[pid].wins++; });
         else if(ev.winnerSide==="B") m.pairB.forEach(pid=>{ if(rows[pid]) rows[pid].wins++; });
       });
@@ -870,7 +901,7 @@
           <label>Turnierart</label>
           <div class="type-option ${d.type==='liga'?'selected':''}" data-action="selectType" data-type="liga">
             <div class="t-name">🏆 Liga (Jeder gegen Jeden)</div>
-            <div class="t-desc">Alle spielen gegeneinander. Tabelle mit Punkten, Sätzen und Spielen.</div>
+            <div class="t-desc">Alle spielen gegeneinander. Tabelle mit Punkten und Spielen.</div>
           </div>
           <div class="type-option ${d.type==='ko'?'selected':''}" style="margin-top:8px;" data-action="selectType" data-type="ko">
             <div class="t-name">🥊 K.-o.-System</div>
@@ -1029,7 +1060,7 @@
     if(m.bye){ winA = !!m.teamAId; winB = !!m.teamBId; }
     else { winA = ev.winnerSide==="A"; winB = ev.winnerSide==="B"; }
 
-    const setsHtml = m.sets.length ? `<div class="set-scores">${m.sets.map(s=>`<span class="set-chip">${s.a}:${s.b}${s.superTiebreak?" (STB)":""}</span>`).join("")}</div>` : "";
+    const setsHtml = m.sets.length ? `<div class="set-scores"><span class="set-chip">${m.sets[0].a}:${m.sets[0].b}</span></div>` : "";
     const roundAttr = roundIndex!=null ? ` data-round="${roundIndex}"` : "";
 
     let actionHtml;
@@ -1070,7 +1101,7 @@
     return `
     <table class="standings">
       <thead><tr>
-        <th class="left">Team</th><th>Sp</th><th>S</th><th>N</th><th>Sätze</th><th>Spiele</th><th>Pkt</th>
+        <th class="left">Team</th><th>Sp</th><th>S</th><th>N</th><th>Spiele</th><th>Pkt</th>
       </tr></thead>
       <tbody>
         ${standings.map((r,i)=>`
@@ -1079,7 +1110,6 @@
             <td>${r.played}</td>
             <td>${r.wins}</td>
             <td>${r.losses}</td>
-            <td class="mono">${r.setsW}:${r.setsL}</td>
             <td class="mono">${r.gamesW}:${r.gamesL}</td>
             <td class="pts">${r.points}</td>
           </tr>`).join("")}
@@ -1273,36 +1303,67 @@
   function modalScore(){
     const t = state.current;
     const m = findModalMatch();
-    const s = state.modalData.setsInput || [{a:"",b:""},{a:"",b:""},{a:"",b:""}];
-    const superOn = !!state.modalData.superTB;
+    const a = state.modalData.a || 0;
+    const b = state.modalData.b || 0;
+    const nameA = sideLabel(t,m,"A");
+    const nameB = sideLabel(t,m,"B");
+    const winner = setWinner(a,b);
+    const tiebreak = a>=6 && b>=6 && !winner;
+    const leadA = a>b, leadB = b>a;
+
+    let statusText, statusExtra;
+    if(winner){
+      const name = winner==="A" ? nameA : nameB;
+      statusText = `Satz beendet — <span class="winner">${esc(name)} gewinnt</span>`;
+      statusExtra = `${a}:${b}`;
+    } else {
+      statusText = tiebreak ? "Tiebreak läuft" : "Satz läuft";
+      statusExtra = `${a}:${b}`;
+    }
+
     return `
     <div class="modal-overlay" data-action="closeModalBg">
       <div class="modal" onclick="event.stopPropagation()">
         <div class="modal-handle"></div>
         <h2>Ergebnis eintragen</h2>
-        <div class="modal-sub">${esc(sideLabel(t,m,"A"))} vs ${esc(sideLabel(t,m,"B"))}</div>
-        <div class="stack">
-          ${[0,1].map(i=>`
-            <div class="set-entry">
-              <div class="set-label">Satz ${i+1}</div>
-              <input type="number" min="0" max="7" id="setA${i}" value="${s[i].a}">
-              <span class="colon">:</span>
-              <input type="number" min="0" max="7" id="setB${i}" value="${s[i].b}">
-            </div>`).join("")}
-          <div class="toggle-row">
-            <span>3. Satz als Match-Tiebreak (bis 10)</span>
-            <div class="switch ${superOn?'on':''}" data-action="toggleSuper"><div class="knob"></div></div>
+        <div class="modal-sub">Ein Satz bis 6 (2 Spiele Vorsprung), bei 6:6 Tiebreak bis 7.</div>
+
+        <div class="court-wrap">
+          <div class="court">
+            ${tiebreak ? `<div class="court-tiebreak-badge">TIEBREAK</div>` : ""}
+            <div class="net"></div>
+            <div class="service-line top"></div>
+            <div class="service-line bottom"></div>
+            <div class="center-line top-half"></div>
+            <div class="center-line bottom-half"></div>
+
+            <div class="court-half top ${leadB?'leading':''}">
+              <div class="court-team-tag">${esc(nameB)}</div>
+              <div class="court-score-num">${b}</div>
+              <div class="court-stepper">
+                <button class="court-step-btn" data-action="courtStep" data-team="B" data-delta="-1">–</button>
+                <button class="court-step-btn" data-action="courtStep" data-team="B" data-delta="1">+</button>
+              </div>
+            </div>
+
+            <div class="court-half bottom ${leadA?'leading':''}">
+              <div class="court-team-tag">${esc(nameA)}</div>
+              <div class="court-score-num">${a}</div>
+              <div class="court-stepper">
+                <button class="court-step-btn" data-action="courtStep" data-team="A" data-delta="-1">–</button>
+                <button class="court-step-btn" data-action="courtStep" data-team="A" data-delta="1">+</button>
+              </div>
+            </div>
           </div>
-          <div class="set-entry">
-            <div class="set-label">Satz 3</div>
-            <input type="number" min="0" max="${superOn?15:7}" id="setA2" value="${s[2].a}">
-            <span class="colon">:</span>
-            <input type="number" min="0" max="${superOn?15:7}" id="setB2" value="${s[2].b}">
+          <div class="court-status-row">
+            <span>${statusText}</span>
+            <span class="mono">${statusExtra}</span>
           </div>
         </div>
-        ${state.modalData.error ? `<div class="banner-error" style="margin-top:8px;">${esc(state.modalData.error)}</div>` : ""}
+
+        ${state.modalData.error ? `<div class="banner-error" style="margin-top:12px;">${esc(state.modalData.error)}</div>` : ""}
         <div class="stack" style="margin-top:16px;">
-          <button class="btn btn-primary" data-action="saveScore">Ergebnis speichern</button>
+          <button class="btn btn-primary" data-action="saveScore" ${winner?"":"disabled"}>Ergebnis speichern</button>
           <button class="btn btn-ghost" data-action="closeModal">Abbrechen</button>
         </div>
       </div>
@@ -1527,37 +1588,29 @@
       const t = state.current;
       const roundIndex = (el.dataset.round!==undefined && el.dataset.round!=="") ? parseInt(el.dataset.round,10) : null;
       const m = roundIndex!=null ? t.ligaRounds[roundIndex].matches.find(x=>x.id===el.dataset.match) : t.matches.find(x=>x.id===el.dataset.match);
-      const setsInput = [0,1,2].map(i=> m.sets[i] ? { a:m.sets[i].a, b:m.sets[i].b } : { a:"", b:"" });
+      const s = m.sets[0];
       state.modal = "score";
-      state.modalData = { matchId: m.id, roundIndex, setsInput, superTB: !!(m.sets[2] && m.sets[2].superTiebreak), error:"" };
+      state.modalData = { matchId: m.id, roundIndex, a: s?s.a:0, b: s?s.b:0, error:"" };
       return render();
     }
-    if(action==="toggleSuper"){
-      state.modalData.superTB = !state.modalData.superTB;
+    if(action==="courtStep"){
+      const team = el.dataset.team;
+      const delta = parseInt(el.dataset.delta,10);
+      const key = team==="A" ? "a" : "b";
+      state.modalData[key] = Math.max(0, Math.min(7, (state.modalData[key]||0) + delta));
+      state.modalData.error = "";
       return render();
     }
     if(action==="saveScore"){
-      const superOn = !!state.modalData.superTB;
-      const raw = [0,1,2].map(i=>{
-        const a = document.getElementById("setA"+i).value;
-        const b = document.getElementById("setB"+i).value;
-        return { a: a===""?null:parseInt(a,10), b: b===""?null:parseInt(b,10) };
-      });
-      const sets = [];
-      for(let i=0;i<3;i++){
-        if(raw[i].a==null && raw[i].b==null) continue;
-        const isSuper = i===2 && superOn;
-        const w = setWinner(raw[i].a, raw[i].b, isSuper);
-        if(!w){
-          state.modalData.error = `Satz ${i+1}: Ergebnis ist regelwidrig (z. B. 6:x mit 2 Spielen Vorsprung, 7:5, 7:6 oder ${isSuper?'10:x Match-Tiebreak':'regulärer Satz'}).`;
-          return render();
-        }
-        sets.push({ a: raw[i].a, b: raw[i].b, superTiebreak: isSuper });
+      const a = state.modalData.a||0, b = state.modalData.b||0;
+      const w = setWinner(a,b);
+      if(!w){
+        state.modalData.error = "Der Satz ist noch nicht entschieden (bis 6 mit 2 Spielen Vorsprung, oder Tiebreak bis 7).";
+        return render();
       }
-      if(sets.length===0){ state.modalData.error = "Bitte mindestens einen Satz eintragen."; return render(); }
       const t = state.current;
       const m = findModalMatch();
-      m.sets = sets;
+      m.sets = [{ a, b }];
       if(t.type==="ko") propagateKO(t);
       await saveTournament(t);
       state.modal = null; state.modalData = {};
