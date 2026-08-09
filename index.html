@@ -287,6 +287,12 @@
     border-radius:12px; border:1px solid rgba(255,255,255,0.1); cursor:pointer; margin-bottom:8px;
   }
   .radio-team:active{background:var(--panel-2);}
+  .radio-team.pick-selected{border-color:var(--ball); background:var(--panel-2);}
+  .pick-check{
+    width:24px; height:24px; border-radius:50%; border:1px solid rgba(255,255,255,0.3);
+    display:flex; align-items:center; justify-content:center; color:var(--ball); font-weight:700;
+    flex-shrink:0; margin-left:auto;
+  }
   .spinner{width:20px;height:20px;border-radius:50%;border:2.5px solid rgba(255,255,255,0.15);border-top-color:var(--ball);animation:spin 0.7s linear infinite; margin:40px auto;}
   @keyframes spin{to{transform:rotate(360deg);}}
   .leg-badge{font-family:'Bebas Neue'; font-size:17px; letter-spacing:0.4px; color:var(--ball); margin:22px 0 8px 2px;}
@@ -418,7 +424,18 @@
     pollHandle: null,
     homeNotice: null,
     pendingJoinCode: null,
-    matchFilter: "all" // "all" | "mine"
+    pendingGroupJoinCode: null,
+    matchFilter: "all", // "all" | "mine"
+
+    myGroups: [],
+    currentGroup: null,
+    currentGroupCode: null,
+    currentGroupTournaments: [],
+    groupCreateError: "",
+    groupJoinCode: "",
+    groupJoinError: "",
+    groupJoinLoading: false,
+    teamPickSelection: [] // ausgewählte Gruppenmitglieder-IDs beim Teams-bilden
   };
 
   const app = document.getElementById("app");
@@ -691,6 +708,26 @@
     t.champion = (final && koCompleted(final, t.setTarget)) ? koWinnerId(final, t.setTarget) : null;
   }
 
+  // Erzeugt den Spielplan (Matches/Runden) für ein bereits konfiguriertes Turnier
+  // (teams/players/courts/rueckrunde/rounds sind schon gesetzt) und markiert es als gestartet.
+  // Wird sowohl bei sofortiger Erstellung als auch beim späteren "Turnier starten" in Gruppen genutzt.
+  function generateMatchesForTournament(t){
+    if(t.type==="liga" && t.ligaMode==="teams"){
+      const courts = t.courts || 1;
+      let matches = buildLegMatches(t.teams, "Hin", courts);
+      if(t.rueckrunde){
+        matches = matches.concat(buildLegMatches(t.teams, "Rueck", courts).map(m=>({ ...m, teamAId:m.teamBId, teamBId:m.teamAId })));
+      }
+      t.matches = matches;
+    } else if(t.type==="liga" && t.ligaMode==="individual"){
+      t.ligaRounds = generateAmericanoRounds(t.players, t.rounds || 6);
+    } else if(t.type==="ko"){
+      t.matches = buildKOBracket(t.teams);
+      propagateKO(t);
+    }
+    t.started = true;
+  }
+
   function roundName(r, total){
     const fromEnd = total-1-r;
     if(fromEnd===0) return "Finale";
@@ -727,6 +764,7 @@
     return t && state.identity && t.organizerId === state.identity.id;
   }
   function canEditMatch(t, match){
+    if(t.finished) return false;
     if(isOrganizer(t)) return true;
     const mem = myMembership(t);
     if(!mem) return false;
@@ -785,6 +823,10 @@
     if(!t.setTarget) t.setTarget = 6;
     if(t.rueckrunde==null) t.rueckrunde = false;
     if(t.rueckrundeStartIndex===undefined) t.rueckrundeStartIndex = null;
+    if(t.groupCode===undefined) t.groupCode = null;
+    if(t.finished==null) t.finished = false;
+    if(t.pointsAwarded==null) t.pointsAwarded = false;
+    if(t.started==null) t.started = true; // ältere Turniere liefen schon immer sofort los
     return t;
   }
   async function loadTournament(code){
@@ -806,6 +848,85 @@
     state.myTournaments = results;
   }
 
+  // ---------- Gruppen: Persistenz ----------
+  async function getMyGroupCodes(){
+    const list = await sGet("my-group-codes", false);
+    return Array.isArray(list) ? list : [];
+  }
+  async function addMyGroupCode(code){
+    const list = await getMyGroupCodes();
+    if(!list.includes(code)){ list.push(code); await sSet("my-group-codes", list, false); }
+  }
+  async function removeMyGroupCode(code){
+    const list = await getMyGroupCodes();
+    const idx = list.indexOf(code);
+    if(idx>=0){ list.splice(idx,1); await sSet("my-group-codes", list, false); }
+  }
+  function normalizeGroup(g){
+    if(!g) return g;
+    if(!g.members) g.members = [];
+    if(!g.tournamentCodes) g.tournamentCodes = [];
+    if(!g.pointsTable) g.pointsTable = {};
+    return g;
+  }
+  async function loadGroup(code){
+    return normalizeGroup(await sGet("group:" + code, true));
+  }
+  async function saveGroup(g){
+    g.updatedAt = Date.now();
+    await sSet("group:" + g.code, g, true);
+  }
+  async function refreshMyGroupsList(){
+    const codes = await getMyGroupCodes();
+    const results = [];
+    for(const code of codes){
+      const g = await loadGroup(code);
+      if(g) results.push(g);
+    }
+    results.sort((a,b)=> (b.updatedAt||0) - (a.updatedAt||0));
+    state.myGroups = results;
+  }
+
+  // ---------- Gruppen: Rollen & Punkte ----------
+  function isGroupLeader(g){
+    return g && state.identity && g.leaderId === state.identity.id;
+  }
+  function myGroupMembership(g){
+    if(!g || !state.identity) return null;
+    return g.members.find(m=>m.userId===state.identity.id) || null;
+  }
+  function isGroupAdmin(g){
+    if(isGroupLeader(g)) return true;
+    const mem = myGroupMembership(g);
+    return !!(mem && mem.promoted);
+  }
+
+  // Platzhalter-Punktevergabe: Teams/Spieler:innen bekommen die gleichen Punkte,
+  // die sie im Turnier selbst erzielt haben, gutgeschrieben auf ihr Gruppenkonto.
+  // Die genaue Formel (Gewichtung nach Turniergröße etc.) klären wir später.
+  function creditGroupPoints(g, t){
+    g.pointsTable = g.pointsTable || {};
+    const add = (userId, pts)=>{
+      if(!userId) return;
+      g.pointsTable[userId] = (g.pointsTable[userId]||0) + pts;
+    };
+    if(t.type==="liga" && t.ligaMode==="individual"){
+      computeIndividualStandings(t).forEach(r=> add(r.player.id, r.points));
+    } else if(t.type==="liga" && t.ligaMode==="teams"){
+      computeStandings(t).forEach(r=> (r.team.memberUserIds||[]).forEach(uid=> add(uid, r.points)));
+    } else if(t.type==="ko"){
+      t.teams.forEach(team=>{
+        let wins = 0;
+        t.matches.forEach(m=>{
+          if(m.teamAId!==team.id && m.teamBId!==team.id) return;
+          const ev = evaluateMatch(m, t.setTarget);
+          if((ev.winnerSide==="A" && m.teamAId===team.id) || (ev.winnerSide==="B" && m.teamBId===team.id)) wins++;
+        });
+        (team.memberUserIds||[]).forEach(uid=> add(uid, wins*2));
+      });
+    }
+  }
+
   // ---------- Navigation ----------
   function stopPolling(){
     if(state.pollHandle){ clearInterval(state.pollHandle); state.pollHandle = null; }
@@ -813,20 +934,39 @@
   function startPolling(){
     stopPolling();
     state.pollHandle = setInterval(async ()=>{
-      if(state.view!=="detail" || !state.currentCode) return;
-      const code = state.currentCode;
-      const fresh = await loadTournament(code);
-      if(!fresh){
-        if(state.currentCode===code){
-          state.homeNotice = `Das Turnier „${state.current ? state.current.name : ""}" ist nicht mehr verfügbar (wahrscheinlich gelöscht).`;
-          await removeMyCode(code);
-          return goHome();
+      if(state.view==="detail" && state.currentCode){
+        const code = state.currentCode;
+        const fresh = await loadTournament(code);
+        if(!fresh){
+          if(state.currentCode===code){
+            state.homeNotice = `Das Turnier „${state.current ? state.current.name : ""}" ist nicht mehr verfügbar (wahrscheinlich gelöscht).`;
+            await removeMyCode(code);
+            return goHome();
+          }
+          return;
+        }
+        if(JSON.stringify(fresh)!==JSON.stringify(state.current)){
+          state.current = fresh;
+          if(!state.modal) render();
         }
         return;
       }
-      if(JSON.stringify(fresh)!==JSON.stringify(state.current)){
-        state.current = fresh;
-        if(!state.modal) render();
+      if(state.view==="groupDetail" && state.currentGroupCode){
+        const code = state.currentGroupCode;
+        const fresh = await loadGroup(code);
+        if(!fresh){
+          if(state.currentGroupCode===code){
+            state.homeNotice = `Die Gruppe „${state.currentGroup ? state.currentGroup.name : ""}" ist nicht mehr verfügbar (wahrscheinlich gelöscht).`;
+            await removeMyGroupCode(code);
+            return goHome();
+          }
+          return;
+        }
+        if(JSON.stringify(fresh)!==JSON.stringify(state.currentGroup)){
+          state.currentGroup = fresh;
+          await refreshGroupTournaments(fresh);
+          if(!state.modal) render();
+        }
       }
     }, 3500);
   }
@@ -834,7 +974,28 @@
   async function goHome(){
     stopPolling();
     state.view = "home"; state.modal=null; state.current=null; state.currentCode=null;
+    state.currentGroup=null; state.currentGroupCode=null;
     await refreshMyTournamentsList();
+    await refreshMyGroupsList();
+    render();
+  }
+
+  async function refreshGroupTournaments(g){
+    const results = [];
+    for(const code of (g.tournamentCodes||[])){
+      const t = await loadTournament(code);
+      if(t) results.push(t);
+    }
+    results.sort((a,b)=> (b.updatedAt||0) - (a.updatedAt||0));
+    state.currentGroupTournaments = results;
+  }
+
+  async function openGroupDetail(code){
+    const g = await loadGroup(code);
+    if(!g){ return goHome(); }
+    state.currentGroup = g; state.currentGroupCode = code; state.view = "groupDetail"; state.modal = null;
+    await refreshGroupTournaments(g);
+    startPolling();
     render();
   }
 
@@ -884,6 +1045,31 @@
     return enterJoinedTournament(res.t, res.mem, code);
   }
 
+  async function attemptJoinGroup(code){
+    const g = await loadGroup(code);
+    if(!g) return { ok:false };
+    let mem = g.members.find(m=>m.userId===state.identity.id);
+    if(!mem){
+      mem = { userId: state.identity.id, name: state.identity.name, promoted:false };
+      g.members.push(mem);
+      await saveGroup(g);
+    }
+    await addMyGroupCode(code);
+    return { ok:true, g };
+  }
+
+  async function tryAutoJoinGroupFromUrl(){
+    const code = state.pendingGroupJoinCode;
+    if(!code) return;
+    state.pendingGroupJoinCode = null;
+    const res = await attemptJoinGroup(code);
+    if(!res.ok){
+      state.homeNotice = `Keine Gruppe mit dem Code „${code}" gefunden — evtl. wurde sie gelöscht.`;
+      return render();
+    }
+    return openGroupDetail(code);
+  }
+
   // ---------- Render: shell ----------
   function render(){
     app.innerHTML = "";
@@ -895,6 +1081,9 @@
     else if(state.view==="createTeams") content = viewCreateTeams();
     else if(state.view==="join") content = viewJoin();
     else if(state.view==="detail") content = viewDetail();
+    else if(state.view==="createGroup") content = viewCreateGroup();
+    else if(state.view==="joinGroup") content = viewJoinGroup();
+    else if(state.view==="groupDetail") content = viewGroupDetail();
     app.innerHTML = content + (state.modal ? renderModal() : "");
     attachHandlers();
   }
@@ -926,6 +1115,7 @@
   // ---------- Home ----------
   function viewHome(){
     const list = state.myTournaments || [];
+    const groups = state.myGroups || [];
     const notice = state.homeNotice;
     state.homeNotice = null;
     const items = list.map(t=>{
@@ -945,6 +1135,19 @@
       </div>`;
     }).join("");
 
+    const groupItems = groups.map(g=>{
+      const role = isGroupLeader(g) ? "Gruppenleiter" : (myGroupMembership(g)?.promoted ? "Co-Leiter" : "Mitglied");
+      return `
+      <div class="tourn-card" data-action="openGroupDetail" data-code="${esc(g.code)}">
+        <div class="name">👥 ${esc(g.name)}</div>
+        <div class="meta">
+          <span class="pill">${g.members.length} Mitglieder</span>
+          <span class="pill muted">${g.tournamentCodes.length} Turniere</span>
+          <span class="pill muted">${esc(role)}</span>
+        </div>
+      </div>`;
+    }).join("");
+
     return `
     <div class="topbar" style="position:static;">
       <div class="brand" style="padding-bottom:0;">
@@ -956,6 +1159,18 @@
       <div class="hero-line"></div>
       ${notice ? `<div class="banner-error" style="margin-bottom:16px;">${esc(notice)}</div>` : ""}
       ${!window.__PADEL_SYNCED__ ? `<div class="banner-info" style="margin-bottom:16px;">Hinweis: Cloud-Speicher ist noch nicht eingerichtet — Turniere sind aktuell nur auf diesem Gerät sichtbar, Einladungen per Code funktionieren nicht geräteübergreifend. Trage deine Firebase-Konfiguration in firebase-config.js ein, damit alle jederzeit beitreten können.</div>` : ""}
+
+      <div class="section-title">Meine Gruppen</div>
+      ${ groups.length ? `<div class="stack">${groupItems}</div>` : `
+        <div class="empty">
+          <span class="ball-icon">👥</span>
+          Noch in keiner Gruppe. Feste Spielrunden legen hier gemeinsam Turniere an.
+        </div>` }
+      <div class="stack" style="margin-top:14px; margin-bottom:28px;">
+        <button class="btn btn-secondary" data-action="goCreateGroup">+ Neue Gruppe erstellen</button>
+        <button class="btn btn-ghost" data-action="goJoinGroup">Gruppe per Code beitreten</button>
+      </div>
+
       <div class="section-title">Meine Turniere</div>
       ${ list.length ? `<div class="stack">${items}</div>` : `
         <div class="empty">
@@ -978,8 +1193,8 @@
     const d = ensureDraft();
     return `
     <div class="topbar">
-      <div class="back-btn" data-action="goHome">←</div>
-      <div><h1>Neues Turnier</h1><div class="sub">Schritt 1 von 2 · Grunddaten</div></div>
+      <div class="back-btn" data-action="${d.groupCode?'backToGroup':'goHome'}">←</div>
+      <div><h1>Neues Turnier</h1><div class="sub">${d.groupCode && state.currentGroup ? `Für Gruppe „${esc(state.currentGroup.name)}" · ` : ""}Schritt 1 von 2 · Grunddaten</div></div>
     </div>
     <div class="screen" style="padding-top:6px;">
       <div class="stack">
@@ -1040,6 +1255,29 @@
   function viewCreateTeams(){
     const d = ensureDraft();
     const individual = d.type==='liga' && d.ligaMode==='individual';
+    const inGroup = !!d.groupCode;
+
+    if(individual && inGroup){
+      const members = d.groupMembers || [];
+      const rows = members.map((m,idx)=>`
+        <div class="team-row">
+          <div class="team-avatar">${idx+1}</div>
+          <div class="t-info"><div class="t-name">${esc(m.name)}</div></div>
+        </div>`).join("");
+      return `
+      <div class="topbar">
+        <div class="back-btn" data-action="backToStep1">←</div>
+        <div><h1>Spieler:innen</h1><div class="sub">Schritt 2 von 2 · alle Gruppenmitglieder</div></div>
+      </div>
+      <div class="screen" style="padding-top:6px;">
+        <div class="stack">
+          <div class="banner-info">Alle ${members.length} Gruppenmitglieder nehmen automatisch teil.${members.length<4?' Mindestens 4 werden für Ohne-feste-Teams-Liga benötigt.':''}</div>
+          ${rows}
+          ${state.createError ? `<div class="banner-error">${esc(state.createError)}</div>` : ""}
+          <button class="btn btn-primary" data-action="startTournament" ${members.length<4?"disabled":""}>Turnier anlegen</button>
+        </div>
+      </div>`;
+    }
 
     if(individual){
       const rows = d.players.map((p,idx)=>`
@@ -1050,7 +1288,7 @@
         </div>`).join("");
       return `
       <div class="topbar">
-        <div class="back-btn" data-action="goCreate">←</div>
+        <div class="back-btn" data-action="backToStep1">←</div>
         <div><h1>Spieler:innen</h1><div class="sub">Schritt 2 von 2 · mind. 4 Spieler:innen</div></div>
       </div>
       <div class="screen" style="padding-top:6px;">
@@ -1083,14 +1321,34 @@
         <button class="icon-btn" data-action="removeTeam" data-idx="${idx}">✕</button>
       </div>`).join("");
 
-    return `
-    <div class="topbar">
-      <div class="back-btn" data-action="goCreate">←</div>
-      <div><h1>Teams</h1><div class="sub">Schritt 2 von 2 · mind. ${min} Teams</div></div>
-    </div>
-    <div class="screen" style="padding-top:6px;">
-      <div class="stack">
-        ${teamRows}
+    let formationHtml;
+    if(inGroup){
+      const assignedIds = new Set(d.teams.flatMap(tm=>tm.memberUserIds||[]));
+      const available = (d.groupMembers||[]).filter(m=>!assignedIds.has(m.userId));
+      const pickRows = available.map(m=>{
+        const picked = state.teamPickSelection.includes(m.userId);
+        return `
+        <div class="radio-team ${picked?'pick-selected':''}" data-action="toggleTeamPick" data-user="${esc(m.userId)}">
+          <div class="team-avatar">${esc((m.name[0]||"?").toUpperCase())}</div>
+          <div class="t-info"><div class="t-name">${esc(m.name)}</div></div>
+          <div class="pick-check">${picked?"✓":""}</div>
+        </div>`;
+      }).join("") || `<div class="empty">Alle Mitglieder sind schon einem Team zugeordnet.</div>`;
+
+      formationHtml = `
+        <div class="banner-info">Wählt zwei Gruppenmitglieder aus, um sie als Team zusammenzustellen — geht von jedem Mitglied selbst oder vom Gruppenleiter.</div>
+        ${pickRows}
+        <div class="card">
+          <div class="stack">
+            <div class="field">
+              <label>Teamname (optional)</label>
+              <input class="input" id="groupTeamName" placeholder="Vorname & Vorname">
+            </div>
+            <button class="btn btn-secondary" data-action="addTeamFromGroup" ${state.teamPickSelection.length!==2?"disabled":""}>+ Team aus Auswahl erstellen</button>
+          </div>
+        </div>`;
+    } else {
+      formationHtml = `
         <div class="card">
           <div class="stack">
             <div class="field">
@@ -1109,7 +1367,18 @@
             </div>
             <button class="btn btn-secondary" data-action="addTeam">+ Team hinzufügen</button>
           </div>
-        </div>
+        </div>`;
+    }
+
+    return `
+    <div class="topbar">
+      <div class="back-btn" data-action="backToStep1">←</div>
+      <div><h1>Teams</h1><div class="sub">Schritt 2 von 2 · mind. ${min} Teams</div></div>
+    </div>
+    <div class="screen" style="padding-top:6px;">
+      <div class="stack">
+        ${teamRows}
+        ${formationHtml}
         ${state.createError ? `<div class="banner-error">${esc(state.createError)}</div>` : ""}
         ${(d.type==='liga' && d.teams.length>=2) ? `
         <div class="field">
@@ -1118,8 +1387,11 @@
         </div>
         <div class="banner-info">Legt fest, wie viele Spiele gleichzeitig laufen können — die Liga wird in passende Runden eingeteilt statt alles hintereinander aufzulisten.</div>
         ` : ""}
-        <div class="banner-info">${d.type==='ko' ? 'Sobald der Turnierbaum ausgelost ist, können keine Teams mehr ergänzt werden.' : 'Sobald der Spielplan erstellt ist, können keine Teams mehr ergänzt werden.'}</div>
-        <button class="btn btn-primary" data-action="startTournament" ${d.teams.length<min?"disabled":""}>${d.type==='ko' ? 'Turnierbaum auslosen & Turnier starten' : 'Spielplan erstellen & Turnier starten'}</button>
+        ${inGroup
+          ? `<div class="banner-info">Das Turnier wird angelegt, der Spielplan wird aber erst erstellt, sobald der Turnierleiter im Turnier auf "Turnier starten" tippt.</div>
+             <button class="btn btn-primary" data-action="startTournament" ${d.teams.length<min?"disabled":""}>Turnier anlegen</button>`
+          : `<div class="banner-info">${d.type==='ko' ? 'Sobald der Turnierbaum ausgelost ist, können keine Teams mehr ergänzt werden.' : 'Sobald der Spielplan erstellt ist, können keine Teams mehr ergänzt werden.'}</div>
+             <button class="btn btn-primary" data-action="startTournament" ${d.teams.length<min?"disabled":""}>${d.type==='ko' ? 'Turnierbaum auslosen & Turnier starten' : 'Spielplan erstellen & Turnier starten'}</button>`}
       </div>
     </div>`;
   }
@@ -1141,6 +1413,104 @@
         <button class="btn btn-primary" data-action="submitJoin" ${state.joinLoading?"disabled":""}>${state.joinLoading ? "Verbinde mit Turnierleiter …" : "Beitreten"}</button>
         <div class="banner-info">Der Code steht in der Einladung des Turnierleiters. Noch einfacher: den QR-Code scannen — der führt direkt zum Beitritt, ganz ohne Code eintippen.</div>
       </div>
+    </div>`;
+  }
+
+  // ---------- Gruppen: Views ----------
+  function viewCreateGroup(){
+    return `
+    <div class="topbar">
+      <div class="back-btn" data-action="goHome">←</div>
+      <div><h1>Neue Gruppe</h1><div class="sub">Für eure feste Spielrunde</div></div>
+    </div>
+    <div class="screen" style="padding-top:6px;">
+      <div class="stack">
+        <div class="field">
+          <label>Gruppenname</label>
+          <input class="input" id="groupNameInput" placeholder="z. B. Dienstagsrunde">
+        </div>
+        <div class="banner-info">In der Gruppe könnt ihr beliebig viele Turniere anlegen. Punkte aus abgeschlossenen Turnieren sammeln sich in einer gemeinsamen Tabelle.</div>
+        ${state.groupCreateError ? `<div class="banner-error">${esc(state.groupCreateError)}</div>` : ""}
+        <button class="btn btn-primary" data-action="submitCreateGroup">Gruppe erstellen</button>
+      </div>
+    </div>`;
+  }
+
+  function viewJoinGroup(){
+    return `
+    <div class="topbar">
+      <div class="back-btn" data-action="goHome">←</div>
+      <div><h1>Gruppe beitreten</h1><div class="sub">Code vom Gruppenleiter eingeben</div></div>
+    </div>
+    <div class="screen" style="padding-top:6px;">
+      <div class="stack">
+        <div class="field">
+          <label>Einladungscode</label>
+          <input class="input code-input" id="groupJoinCodeInput" maxlength="6" placeholder="ABC123" value="${esc(state.groupJoinCode)}">
+        </div>
+        ${state.groupJoinError ? `<div class="banner-error">${esc(state.groupJoinError)}</div>` : ""}
+        <button class="btn btn-primary" data-action="submitJoinGroup" ${state.groupJoinLoading?"disabled":""}>${state.groupJoinLoading?"Beitreten …":"Beitreten"}</button>
+      </div>
+    </div>`;
+  }
+
+  function groupPointsTable(g){
+    const rows = g.members.map(mem=>({ mem, points: (g.pointsTable && g.pointsTable[mem.userId]) || 0 }))
+      .sort((a,b)=> b.points-a.points);
+    return `
+    <table class="standings">
+      <thead><tr><th class="left">Mitglied</th><th>Punkte</th></tr></thead>
+      <tbody>
+        ${rows.map((r,i)=>`
+          <tr>
+            <td class="left"><span class="rank">${i+1}</span>&nbsp; ${esc(r.mem.name)}${r.mem.userId===g.leaderId?" 👑":""}</td>
+            <td class="pts">${r.points}</td>
+          </tr>`).join("")}
+      </tbody>
+    </table>`;
+  }
+
+  function viewGroupDetail(){
+    const g = state.currentGroup;
+    const admin = isGroupAdmin(g);
+    const mem = myGroupMembership(g);
+    const roleLabel = isGroupLeader(g) ? "Gruppenleiter" : (mem && mem.promoted ? "Co-Leiter" : "Mitglied");
+
+    const gTournaments = state.currentGroupTournaments || [];
+    const tournCards = gTournaments.length ? `<div class="stack">${gTournaments.map(t=>{
+      const countLabel = (t.type==="liga" && t.ligaMode==="individual") ? `${t.players.length} Spieler:innen` : `${t.teams.length} Teams`;
+      const typeLabel = t.type==="ko" ? "K.-o.-System" : (t.ligaMode==="individual" ? "Liga · ohne feste Teams" : "Liga");
+      const statusLabel = t.finished ? "Beendet" : (t.started ? "Läuft" : "Wird gebildet");
+      return `
+      <div class="tourn-card" data-action="openDetail" data-code="${esc(t.code)}" style="border-left-color:var(--pcourt);">
+        <div class="name">${esc(t.name)}</div>
+        <div class="meta">
+          <span class="pill">${esc(typeLabel)}</span>
+          <span class="pill muted">${esc(countLabel)}</span>
+          <span class="pill muted">${esc(statusLabel)}</span>
+        </div>
+      </div>`;
+    }).join("")}</div>` : `<div class="empty">Noch keine Turniere in dieser Gruppe.</div>`;
+
+    return `
+    <div class="topbar">
+      <div class="back-btn" data-action="goHome">←</div>
+      <div>
+        <h1>👥 ${esc(g.name)}</h1>
+        <div class="sub"><span data-action="openGroupMembers" style="cursor:pointer;">${esc(roleLabel)} · <span class="live-dot"></span> ${g.members.length} Mitglieder</span></div>
+      </div>
+      <button class="icon-btn" style="font-size:22px;" data-action="openGroupInvite" title="Einladen">＋👤</button>
+    </div>
+    <div class="screen" style="padding-top:6px;">
+      <div class="section-title">Gesamttabelle</div>
+      <div class="banner-info" style="margin-bottom:14px;">Punkte aus allen beendeten Turnieren dieser Gruppe. Die genaue Gewichtung feilen wir später noch aus.</div>
+      ${groupPointsTable(g)}
+
+      <div class="section-title">Turniere in dieser Gruppe</div>
+      ${tournCards}
+      ${admin ? `<button class="btn btn-primary" style="margin-top:14px;" data-action="goCreateInGroup">+ Neues Turnier in dieser Gruppe</button>` : `<div class="banner-info" style="margin-top:14px;">Nur der Gruppenleiter kann neue Turniere anlegen.</div>`}
+
+      <button class="btn btn-danger" style="margin-top:26px;" data-action="deleteGroup">${isGroupLeader(g) ? "🗑 Gruppe löschen" : "Gruppe verlassen"}</button>
     </div>`;
   }
 
@@ -1319,6 +1689,29 @@
     return html;
   }
 
+  function renderFormingState(t){
+    const org = isOrganizer(t);
+    const isIndividual = t.type==="liga" && t.ligaMode==="individual";
+    let html = `<div class="banner-info" style="margin-bottom:14px;">Das Turnier wird gerade vorbereitet. Sobald ${org ? "du auf \"Turnier starten\" tippst" : "der Turnierleiter startet"}, wird der Spielplan erstellt.</div>`;
+    if(isIndividual){
+      html += `<div class="section-title">Teilnehmer:innen</div>`;
+      html += t.players.map((p,i)=>`
+        <div class="team-row"><div class="team-avatar">${i+1}</div><div class="t-info"><div class="t-name">${esc(p.name)}</div></div></div>`).join("");
+    } else {
+      const min = t.type==="ko" ? 2 : 3;
+      html += `<div class="section-title">Teams (${t.teams.length}${t.teams.length<min?` · mind. ${min} nötig`:''})</div>`;
+      html += t.teams.length ? t.teams.map((team,i)=>`
+        <div class="team-row"><div class="team-avatar">${i+1}</div><div class="t-info"><div class="t-name">${esc(team.name)}</div><div class="t-players">${[team.p1,team.p2].filter(Boolean).map(esc).join(" & ")}</div></div></div>`).join("")
+        : `<div class="empty">Noch keine Teams gebildet.</div>`;
+    }
+    if(org){
+      const min = isIndividual ? 4 : (t.type==="ko" ? 2 : 3);
+      const count = isIndividual ? t.players.length : t.teams.length;
+      html += `<button class="btn btn-primary" style="margin-top:18px;" data-action="beginTournamentPlay" ${count<min?"disabled":""}>Turnier starten</button>`;
+    }
+    return html;
+  }
+
   function viewDetail(){
     const t = state.current;
     const org = isOrganizer(t);
@@ -1337,7 +1730,9 @@
     }
 
     let body;
-    if(isKO){
+    if(!t.started){
+      body = renderFormingState(t);
+    } else if(isKO){
       body = renderKOBracket(t);
     } else if(isIndividual){
       body = state.tab==="table" ? renderIndividualStandings(t) : renderIndividualRounds(t);
@@ -1345,25 +1740,28 @@
       body = state.tab==="table" ? renderTeamStandings(t) : renderTeamMatches(t);
     }
 
-    const showTabs = !isKO;
+    const showTabs = t.started && !isKO;
+    const backAttr = t.groupCode ? ` data-action="openGroupDetail" data-code="${esc(t.groupCode)}"` : ` data-action="goHome"`;
 
     return `
     <div class="topbar">
-      <div class="back-btn" data-action="goHome">←</div>
+      <div class="back-btn"${backAttr}>←</div>
       <div>
         <h1>${esc(t.name)}</h1>
-        <div class="sub"><span data-action="openMembers" style="cursor:pointer;">${esc(subtitleEntity)} · <span class="live-dot"></span> live</span></div>
+        <div class="sub"><span data-action="openMembers" style="cursor:pointer;">${esc(subtitleEntity)} · <span class="live-dot"></span> live</span>${t.finished ? ' · <span style="color:var(--coral);">beendet</span>' : ''}</div>
       </div>
       <button class="icon-btn" style="font-size:22px;" data-action="openInvite" title="Einladen">＋👤</button>
     </div>
     <div class="screen" style="padding-top:6px;">
+      ${t.finished ? `<div class="champion-banner">🏁 Turnier beendet — Punkte wurden der Gruppe gutgeschrieben</div>` : ""}
       ${showTabs ? `
       <div class="tabs">
         <div class="tab ${state.tab==='table'?'active':''}" data-action="switchTab" data-tab="table">Tabelle</div>
         <div class="tab ${state.tab==='matches'?'active':''}" data-action="switchTab" data-tab="matches">${isIndividual?'Runden':'Spiele'}</div>
       </div>` : ""}
       ${body}
-      <button class="btn btn-danger" style="margin-top:26px;" data-action="deleteTournament" data-code="${esc(t.code)}">${org ? "🗑 Turnier löschen" : "Turnier aus meiner Liste entfernen"}</button>
+      ${(t.groupCode && t.started && !t.finished && org) ? `<button class="btn btn-secondary" style="margin-top:18px;" data-action="finishTournament">🏁 Turnier beenden</button>` : ""}
+      <button class="btn btn-danger" style="margin-top:14px;" data-action="deleteTournament" data-code="${esc(t.code)}">${org ? "🗑 Turnier löschen" : "Turnier aus meiner Liste entfernen"}</button>
     </div>`;
   }
 
@@ -1377,7 +1775,92 @@
     if(state.modal==="reassignTeam") return modalReassignTeam();
     if(state.modal==="removeMember") return modalRemoveMember();
     if(state.modal==="teamMatches") return modalTeamMatches();
+    if(state.modal==="groupInvite") return modalGroupInvite();
+    if(state.modal==="groupMembers") return modalGroupMembers();
+    if(state.modal==="groupDeleteConfirm") return modalGroupDeleteConfirm();
     return "";
+  }
+
+  function groupJoinUrl(code){
+    return `${window.location.origin}${window.location.pathname}?joinGroup=${code}`;
+  }
+
+  function modalGroupInvite(){
+    const g = state.currentGroup;
+    return `
+    <div class="modal-overlay" data-action="closeModalBg">
+      <div class="modal" onclick="event.stopPropagation()">
+        <div class="modal-handle"></div>
+        <h2>Zur Gruppe einladen</h2>
+        <div class="modal-sub">QR-Code scannen führt direkt zum Beitritt zu „${esc(g.name)}".</div>
+        <div class="code-display">${esc(g.code)}</div>
+        <div id="qrbox"></div>
+        <div class="stack">
+          <button class="btn btn-primary" data-action="shareGroupInvite">Einladung teilen</button>
+          <button class="btn btn-secondary" data-action="copyGroupCode">Code kopieren</button>
+          <button class="btn btn-ghost" data-action="closeModal">Schließen</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  function modalGroupMembers(){
+    const g = state.currentGroup;
+    const admin = isGroupAdmin(g);
+    const leader = isGroupLeader(g);
+    const rows = g.members.map(mem=>{
+      const isLeader = mem.userId===g.leaderId;
+      let roleBadge = "Mitglied";
+      if(isLeader) roleBadge = "Gruppenleiter";
+      else if(mem.promoted) roleBadge = "Co-Leiter";
+      const pts = (g.pointsTable && g.pointsTable[mem.userId]) || 0;
+
+      const controls = (leader && !isLeader) ? `
+        <div class="row" style="margin:-4px 0 10px 0; gap:8px;">
+          <button class="btn ${mem.promoted?'btn-secondary':'btn-ghost'} btn-sm" style="flex:1;" data-action="toggleGroupPromote" data-user="${esc(mem.userId)}">${mem.promoted?"Co-Leiter entfernen":"Zu Co-Leiter machen"}</button>
+          <button class="btn btn-danger btn-sm" style="flex:1;" data-action="removeGroupMember" data-user="${esc(mem.userId)}">Entfernen</button>
+        </div>` : "";
+
+      return `
+      <div class="team-row" style="align-items:center;">
+        <div class="team-avatar">${esc((mem.name[0]||"?").toUpperCase())}</div>
+        <div class="t-info">
+          <div class="t-name">${esc(mem.name)}${isLeader?" 👑":""}</div>
+          <div class="t-players">${esc(roleBadge)} · ${pts} Pkt.</div>
+        </div>
+      </div>
+      ${controls}`;
+    }).join("");
+
+    return `
+    <div class="modal-overlay" data-action="closeModalBg">
+      <div class="modal" onclick="event.stopPropagation()">
+        <div class="modal-handle"></div>
+        <h2>Gruppenmitglieder</h2>
+        <div class="modal-sub">${g.members.length} dabei. ${leader ? "Als Gruppenleiter kannst du Co-Leiter ernennen oder Mitglieder entfernen." : ""}</div>
+        <div class="stack">${rows}</div>
+        <button class="btn btn-ghost" style="margin-top:16px;" data-action="closeModal">Schließen</button>
+      </div>
+    </div>`;
+  }
+
+  function modalGroupDeleteConfirm(){
+    const g = state.currentGroup;
+    const leader = isGroupLeader(g);
+    return `
+    <div class="modal-overlay" data-action="closeModalBg">
+      <div class="modal" onclick="event.stopPropagation()">
+        <div class="modal-handle"></div>
+        <h2>${leader ? "Gruppe löschen?" : "Gruppe verlassen?"}</h2>
+        <div class="modal-sub">${leader
+          ? `„${esc(g.name)}" wird für alle endgültig gelöscht, inklusive der Punktetabelle. Turniere, die schon liefen, bleiben separat über ihren Code erreichbar.`
+          : `Du verlässt „${esc(g.name)}". Für alle anderen bleibt die Gruppe bestehen, du kannst jederzeit mit dem Code wieder beitreten.`}</div>
+        <div class="stack">
+          <button class="btn btn-danger" style="border:1px solid var(--coral); background:rgba(228,87,46,0.12);" data-action="confirmDeleteGroup">${leader?"Endgültig löschen":"Verlassen"}</button>
+          <button class="btn btn-ghost" data-action="closeModal">Abbrechen</button>
+        </div>
+      </div>
+    </div>`;
   }
 
   function modalTeamMatches(){
@@ -1659,10 +2142,14 @@
       el.addEventListener("click", (e)=> handleAction(el.dataset.action, el, e));
     });
     const qrbox = document.getElementById("qrbox");
-    if(qrbox && state.current && window.QRCode){
+    if(qrbox && window.QRCode){
       qrbox.innerHTML = "";
       try{
-        new QRCode(qrbox, { text: joinUrl(state.current.code), width:180, height:180, colorDark:"#0A211D", colorLight:"#ffffff" });
+        if(state.modal==="groupInvite" && state.currentGroup){
+          new QRCode(qrbox, { text: groupJoinUrl(state.currentGroup.code), width:180, height:180, colorDark:"#0A211D", colorLight:"#ffffff" });
+        } else if(state.current){
+          new QRCode(qrbox, { text: joinUrl(state.current.code), width:180, height:180, colorDark:"#0A211D", colorLight:"#ffffff" });
+        }
       }catch(e){ qrbox.innerHTML = '<div style="color:#333;padding:20px;">QR nicht verfügbar</div>'; }
     }
   }
@@ -1675,12 +2162,94 @@
       if(!val) return;
       state.identity = await saveIdentity(val);
       await goHome();
-      if(state.pendingJoinCode) return tryAutoJoinFromUrl();
+      if(state.pendingJoinCode) await tryAutoJoinFromUrl();
+      if(state.pendingGroupJoinCode) await tryAutoJoinGroupFromUrl();
       return;
     }
     if(action==="goHome") return goHome();
+    if(action==="backToGroup"){ return openGroupDetail(state.draft && state.draft.groupCode ? state.draft.groupCode : state.currentGroupCode); }
     if(action==="goCreate"){ state.draft = { name:"", type:"liga", ligaMode:"teams", rueckrunde:false, rounds:6, teams:[], players:[] }; state.createError=""; state.view="create"; return render(); }
+    if(action==="backToStep1"){ state.createError=""; state.view="create"; return render(); }
     if(action==="goJoin"){ state.joinCode=""; state.joinError=""; state.view="join"; return render(); }
+
+    if(action==="goCreateGroup"){ state.groupCreateError=""; state.view="createGroup"; return render(); }
+    if(action==="submitCreateGroup"){
+      const name = document.getElementById("groupNameInput").value.trim();
+      if(!name){ state.groupCreateError = "Bitte gib einen Gruppennamen ein."; return render(); }
+      const code = genCode();
+      const g = {
+        code, name,
+        leaderId: state.identity.id, leaderName: state.identity.name,
+        members: [{ userId: state.identity.id, name: state.identity.name, promoted:false }],
+        tournamentCodes: [], pointsTable: {}, createdAt: Date.now()
+      };
+      await saveGroup(g);
+      await addMyGroupCode(code);
+      return openGroupDetail(code);
+    }
+    if(action==="goJoinGroup"){ state.groupJoinCode=""; state.groupJoinError=""; state.view="joinGroup"; return render(); }
+    if(action==="submitJoinGroup"){
+      const code = document.getElementById("groupJoinCodeInput").value.trim().toUpperCase();
+      if(!code){ state.groupJoinError="Bitte Code eingeben."; return render(); }
+      state.groupJoinLoading = true; state.groupJoinError=""; render();
+      const res = await attemptJoinGroup(code);
+      state.groupJoinLoading = false;
+      if(!res.ok){ state.groupJoinError = "Keine Gruppe mit diesem Code gefunden."; return render(); }
+      return openGroupDetail(code);
+    }
+    if(action==="openGroupDetail") return openGroupDetail(el.dataset.code);
+
+    if(action==="openGroupInvite"){ state.modal="groupInvite"; return render(); }
+    if(action==="copyGroupCode"){
+      try{ await navigator.clipboard.writeText(state.currentGroup.code); }catch(e){}
+      const btn = el; const old = btn.textContent; btn.textContent = "Kopiert ✓"; setTimeout(()=>{ btn.textContent = old; }, 1400);
+      return;
+    }
+    if(action==="shareGroupInvite"){
+      const g = state.currentGroup;
+      const text = `Tritt unserer Padel-Gruppe „${g.name}" bei! Einfach antippen:\n${groupJoinUrl(g.code)}\n\nOder den Code manuell eingeben: ${g.code}`;
+      if(navigator.share){ try{ await navigator.share({ title: "Gruppen-Einladung", text }); }catch(e){} }
+      else { try{ await navigator.clipboard.writeText(text); el.textContent="Text kopiert ✓"; setTimeout(()=>render(),1400);}catch(e){} }
+      return;
+    }
+    if(action==="openGroupMembers"){ state.modal="groupMembers"; return render(); }
+    if(action==="toggleGroupPromote"){
+      const g = state.currentGroup;
+      if(!isGroupLeader(g)) return;
+      const mem = g.members.find(m=>m.userId===el.dataset.user);
+      if(mem){ mem.promoted = !mem.promoted; await saveGroup(g); }
+      return render();
+    }
+    if(action==="removeGroupMember"){
+      const g = state.currentGroup;
+      if(!isGroupLeader(g)) return;
+      const idx = g.members.findIndex(m=>m.userId===el.dataset.user);
+      if(idx>=0) g.members.splice(idx,1);
+      await saveGroup(g);
+      return render();
+    }
+    if(action==="deleteGroup"){ state.modal="groupDeleteConfirm"; return render(); }
+    if(action==="confirmDeleteGroup"){
+      const g = state.currentGroup;
+      const leader = isGroupLeader(g);
+      if(leader) await sDelete("group:"+g.code, true);
+      await removeMyGroupCode(g.code);
+      state.modal=null; state.modalData={};
+      return goHome();
+    }
+
+    if(action==="goCreateInGroup"){
+      const g = state.currentGroup;
+      if(!isGroupAdmin(g)) return;
+      state.draft = {
+        name:"", type:"liga", ligaMode:"teams", rueckrunde:false, rounds:6, setTarget:6,
+        teams:[], players:[], groupCode: g.code, groupMembers: g.members.slice()
+      };
+      state.createError = "";
+      state.teamPickSelection = [];
+      state.view = "create";
+      return render();
+    }
 
     if(action==="selectType"){ state.draft.type = el.dataset.type; return render(); }
     if(action==="selectLigaMode"){ state.draft.ligaMode = el.dataset.mode; return render(); }
@@ -1720,6 +2289,29 @@
       state.draft.teams.splice(idx,1);
       return render();
     }
+    if(action==="toggleTeamPick"){
+      const uid_ = el.dataset.user;
+      const sel = state.teamPickSelection;
+      const idx = sel.indexOf(uid_);
+      if(idx>=0) sel.splice(idx,1);
+      else { if(sel.length>=2) sel.shift(); sel.push(uid_); }
+      return render();
+    }
+    if(action==="addTeamFromGroup"){
+      const d = state.draft;
+      if(state.teamPickSelection.length!==2) return;
+      const [id1,id2] = state.teamPickSelection;
+      const m1 = (d.groupMembers||[]).find(m=>m.userId===id1);
+      const m2 = (d.groupMembers||[]).find(m=>m.userId===id2);
+      if(!m1 || !m2) return;
+      const nameInput = document.getElementById("groupTeamName");
+      const customName = nameInput ? nameInput.value.trim() : "";
+      const name = customName || `${m1.name} & ${m2.name}`;
+      d.teams.push({ id: uid("t"), name, p1:m1.name, p2:m2.name, memberUserIds:[id1,id2] });
+      state.teamPickSelection = [];
+      state.createError = "";
+      return render();
+    }
     if(action==="addPlayer"){
       const name = document.getElementById("newPlayerName").value.trim();
       if(!name){ state.createError = "Bitte gib einen Namen ein."; return render(); }
@@ -1735,6 +2327,7 @@
 
     if(action==="startTournament"){
       const d = state.draft;
+      const inGroup = !!d.groupCode;
       const code = genCode();
       const t = {
         code,
@@ -1743,12 +2336,15 @@
         setTarget: d.setTarget || 6,
         organizerId: state.identity.id,
         organizerName: state.identity.name,
+        groupCode: d.groupCode || null,
         teams: [],
         players: [],
-        members: [{ userId: state.identity.id, name: state.identity.name, teamId: null }],
+        members: [],
         matches: [],
         ligaRounds: [],
-        started: true,
+        started: !inGroup,
+        finished: false,
+        pointsAwarded: false,
         createdAt: Date.now()
       };
 
@@ -1765,24 +2361,44 @@
             courts = (!isNaN(cv) && cv>0) ? Math.min(cv,20) : Math.max(1, Math.floor(d.teams.length/2));
           }
           t.courts = courts;
-          let matches = buildLegMatches(d.teams, "Hin", courts);
-          if(t.rueckrunde){
-            matches = matches.concat(buildLegMatches(d.teams, "Rueck", courts).map(m=>({ ...m, teamAId:m.teamBId, teamBId:m.teamAId })));
-          }
-          t.matches = matches;
         } else {
-          if(d.players.length<4) return;
-          t.players = d.players;
+          if(inGroup){
+            if(!d.groupMembers || d.groupMembers.length<4) return;
+            t.players = d.groupMembers.map(m=>({ id:m.userId, name:m.name }));
+          } else {
+            if(d.players.length<4) return;
+            t.players = d.players;
+          }
           t.rounds = d.rounds || 6;
-          t.ligaRounds = generateAmericanoRounds(d.players, t.rounds);
         }
       } else if(d.type==="ko"){
         if(d.teams.length<2) return;
         t.teams = d.teams;
-        t.matches = buildKOBracket(d.teams);
-        propagateKO(t);
       }
 
+      if(inGroup){
+        if(t.ligaMode==="individual"){
+          t.members = t.players.map(p=>({ userId:p.id, name:p.name, teamId:p.id }));
+        } else {
+          t.teams.forEach(team=>{
+            (team.memberUserIds||[]).forEach(uid_=>{
+              const gm = d.groupMembers.find(m=>m.userId===uid_);
+              t.members.push({ userId: uid_, name: gm?gm.name:"?", teamId: team.id });
+            });
+          });
+        }
+        if(!t.members.find(m=>m.userId===state.identity.id)){
+          t.members.push({ userId: state.identity.id, name: state.identity.name, teamId: null });
+        }
+        await saveTournament(t);
+        const g = await loadGroup(d.groupCode);
+        if(g){ g.tournamentCodes.push(code); await saveGroup(g); }
+        state.draft = null;
+        return openGroupDetail(d.groupCode);
+      }
+
+      t.members = [{ userId: state.identity.id, name: state.identity.name, teamId: null }];
+      generateMatchesForTournament(t);
       await saveTournament(t);
       await addMyCode(code);
       state.draft = null;
@@ -1855,6 +2471,33 @@
         t.rueckrunde = true;
       } else {
         return;
+      }
+      await saveTournament(t);
+      return render();
+    }
+
+    if(action==="beginTournamentPlay"){
+      const t = state.current;
+      if(!isOrganizer(t) || t.started) return;
+      const isIndividual = t.type==="liga" && t.ligaMode==="individual";
+      const min = isIndividual ? 4 : (t.type==="ko" ? 2 : 3);
+      const count = isIndividual ? t.players.length : t.teams.length;
+      if(count<min) return;
+      generateMatchesForTournament(t);
+      await saveTournament(t);
+      return render();
+    }
+    if(action==="finishTournament"){
+      const t = state.current;
+      if(!isOrganizer(t) || !t.started || t.finished) return;
+      t.finished = true;
+      if(!t.pointsAwarded && t.groupCode){
+        const g = await loadGroup(t.groupCode);
+        if(g){
+          creditGroupPoints(g, t);
+          await saveGroup(g);
+          t.pointsAwarded = true;
+        }
       }
       await saveTournament(t);
       return render();
@@ -1991,8 +2634,14 @@
     try{
       const params = new URLSearchParams(window.location.search);
       const joinParam = params.get("join");
+      const joinGroupParam = params.get("joinGroup");
       if(joinParam){
         state.pendingJoinCode = joinParam.trim().toUpperCase();
+      }
+      if(joinGroupParam){
+        state.pendingGroupJoinCode = joinGroupParam.trim().toUpperCase();
+      }
+      if(joinParam || joinGroupParam){
         history.replaceState(null, "", window.location.pathname);
       }
     }catch(e){ /* ignore malformed URLs */ }
@@ -2000,9 +2649,11 @@
     state.identity = await loadIdentity();
     if(!state.identity){ state.view = "onboarding"; return render(); }
     await refreshMyTournamentsList();
+    await refreshMyGroupsList();
     state.view = "home";
     render();
     if(state.pendingJoinCode) await tryAutoJoinFromUrl();
+    if(state.pendingGroupJoinCode) await tryAutoJoinGroupFromUrl();
   }
   boot();
 
