@@ -1327,8 +1327,12 @@
     const isKO = t.type==="ko";
 
     let subtitleEntity = "Zuschauer";
-    if(org) subtitleEntity = "Du bist Turnierleiter";
-    else if(mem && mem.teamId){
+    if(org){
+      subtitleEntity = "Turnierleiter";
+      if(mem && mem.teamId){
+        subtitleEntity += " · " + (isIndividual ? playerName(t, mem.teamId) : teamName(t, mem.teamId));
+      }
+    } else if(mem && mem.teamId){
       subtitleEntity = isIndividual ? ("Spieler:in: " + playerName(t, mem.teamId)) : ("Team: " + teamName(t, mem.teamId));
     }
 
@@ -1413,10 +1417,13 @@
     const org = isOrganizer(t);
     const rows = t.members.map(mem=>{
       const isOrg = mem.userId===t.organizerId;
+      const isMe = state.identity && mem.userId===state.identity.id;
       let roleBadge = "Spieler:in";
-      if(isOrg) roleBadge = "Turnierleiter";
+      if(isOrg) roleBadge = mem.teamId ? "Turnierleiter + Spieler:in" : "Turnierleiter";
       else if(mem.promoted) roleBadge = "Darf alle Ergebnisse eintragen";
       else if(!mem.teamId) roleBadge = "Zuschauer:in";
+
+      const entityLabel = (isOrg && !mem.teamId) ? "Nur Spielleiter" : memberEntityLabel(t, mem);
 
       const canManage = org && !isOrg;
       const orgControls = canManage ? `
@@ -1428,15 +1435,20 @@
           ${mem.promoted ? "Berechtigung entziehen" : "Für alle Spiele befördern"}
         </button>` : "";
 
+      const selfControl = (isOrg && isMe) ? `
+        <button class="btn btn-secondary btn-sm" style="width:100%; margin-bottom:10px;" data-action="openReassign" data-user="${esc(mem.userId)}" data-name="${esc(mem.name)}">
+          ${mem.teamId ? "Mein Team ändern" : "Selbst einem Team beitreten"}
+        </button>` : "";
+
       return `
       <div class="team-row" style="align-items:center;">
         <div class="team-avatar">${esc((mem.name[0]||"?").toUpperCase())}</div>
         <div class="t-info">
           <div class="t-name">${esc(mem.name)}${isOrg ? " 👑" : ""}</div>
-          <div class="t-players">${esc(memberEntityLabel(t, mem))} · ${esc(roleBadge)}</div>
+          <div class="t-players">${esc(entityLabel)} · ${esc(roleBadge)}</div>
         </div>
       </div>
-      ${orgControls}`;
+      ${orgControls}${selfControl}`;
     }).join("");
 
     return `
@@ -1444,7 +1456,7 @@
       <div class="modal" onclick="event.stopPropagation()">
         <div class="modal-handle"></div>
         <h2>Beigetretene Spieler:innen</h2>
-        <div class="modal-sub">${t.members.length} beigetreten. ${org ? "Als Turnierleiter kannst du Teams korrigieren, Ergebnis-Rechte vergeben oder Personen entfernen." : ""}</div>
+        <div class="modal-sub">${t.members.length} beigetreten. ${org ? "Als Turnierleiter kannst du Teams korrigieren, Ergebnis-Rechte vergeben, Personen entfernen — und selbst einem Team beitreten oder nur leiten." : ""}</div>
         <div class="stack">${rows}</div>
         <button class="btn btn-ghost" style="margin-top:16px;" data-action="closeModal">Schließen</button>
       </div>
