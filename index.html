@@ -692,7 +692,9 @@
   function canEditMatch(t, match){
     if(isOrganizer(t)) return true;
     const mem = myMembership(t);
-    if(!mem || !mem.teamId) return false;
+    if(!mem) return false;
+    if(mem.promoted) return true;
+    if(!mem.teamId) return false;
     if(match.pairA) return match.pairA.includes(mem.teamId) || match.pairB.includes(mem.teamId);
     if(match.teamAId==null || match.teamBId==null) return false;
     return mem.teamId===match.teamAId || mem.teamId===match.teamBId;
@@ -1072,16 +1074,15 @@
     const roundAttr = roundIndex!=null ? ` data-round="${roundIndex}"` : "";
 
     let actionHtml;
+    const viewable = !m.bye && !pending; // spectators can open these to see the live score
     if(m.bye){
       actionHtml = `<span class="bye-badge">Freilos</span>`;
     } else if(pending){
       actionHtml = `<span class="status-text">Wartet auf vorherige Runde</span>`;
     } else if(editable){
       actionHtml = `<button class="btn btn-secondary btn-sm" data-action="openScore" data-match="${m.id}"${roundAttr}>${m.sets.length ? "Ergebnis bearbeiten" : "Ergebnis eintragen"}</button>`;
-    } else if(m.sets.length){
-      actionHtml = "";
     } else {
-      actionHtml = `<span class="status-text">Nur Team oder Turnierleiter</span>`;
+      actionHtml = `<span class="status-text">${m.sets.length ? "Antippen für Live-Stand" : "Noch nicht begonnen"}</span>`;
     }
 
     let statusText;
@@ -1089,8 +1090,10 @@
     else if(pending) statusText = "Ausstehend";
     else statusText = ev.completed ? "Beendet" : (m.sets.length ? "Läuft" : "Ausstehend");
 
+    const cardClickAttr = (viewable && !editable) ? ` data-action="openScore" data-match="${m.id}"${roundAttr} style="cursor:pointer;"` : "";
+
     return `
-    <div class="match-card" style="margin-bottom:12px;">
+    <div class="match-card"${cardClickAttr} style="margin-bottom:12px;">
       <div class="match-teams">
         <div class="match-team ${winA?'win':''}">${esc(nameA)}</div>
         <div class="vs-net">VS</div>
@@ -1217,7 +1220,7 @@
       <div class="back-btn" data-action="goHome">←</div>
       <div>
         <h1>${esc(t.name)}</h1>
-        <div class="sub">${esc(subtitleEntity)} · <span class="live-dot"></span> live</div>
+        <div class="sub"><span data-action="openMembers" style="cursor:pointer;">${esc(subtitleEntity)} · <span class="live-dot"></span> live</span></div>
       </div>
       <button class="icon-btn" style="font-size:22px;" data-action="openInvite" title="Einladen">＋👤</button>
     </div>
@@ -1238,7 +1241,53 @@
     if(state.modal==="score") return modalScore();
     if(state.modal==="jointeam") return modalJoinTeam();
     if(state.modal==="deleteConfirm") return modalDeleteConfirm();
+    if(state.modal==="members") return modalMembers();
     return "";
+  }
+
+  function memberEntityLabel(t, mem){
+    if(!mem.teamId) return "Zuschauer:in";
+    const isIndividual = t.type==="liga" && t.ligaMode==="individual";
+    return isIndividual ? playerName(t, mem.teamId) : teamName(t, mem.teamId);
+  }
+
+  function modalMembers(){
+    const t = state.current;
+    const org = isOrganizer(t);
+    const rows = t.members.map(mem=>{
+      const isOrg = mem.userId===t.organizerId;
+      let roleBadge = "Spieler:in";
+      if(isOrg) roleBadge = "Turnierleiter";
+      else if(mem.promoted) roleBadge = "Darf alle Ergebnisse eintragen";
+      else if(!mem.teamId) roleBadge = "Zuschauer:in";
+
+      const canPromote = org && !isOrg;
+      const promoteBtn = canPromote ? `
+        <button class="btn ${mem.promoted?'btn-secondary':'btn-ghost'} btn-sm" data-action="togglePromote" data-user="${esc(mem.userId)}">
+          ${mem.promoted ? "Berechtigung entziehen" : "Für alle Spiele befördern"}
+        </button>` : "";
+
+      return `
+      <div class="team-row" style="align-items:center;">
+        <div class="team-avatar">${esc((mem.name[0]||"?").toUpperCase())}</div>
+        <div class="t-info">
+          <div class="t-name">${esc(mem.name)}${isOrg ? " 👑" : ""}</div>
+          <div class="t-players">${esc(memberEntityLabel(t, mem))} · ${esc(roleBadge)}</div>
+        </div>
+      </div>
+      ${promoteBtn ? `<div style="margin:-4px 0 4px 0;">${promoteBtn}</div>` : ""}`;
+    }).join("");
+
+    return `
+    <div class="modal-overlay" data-action="closeModalBg">
+      <div class="modal" onclick="event.stopPropagation()">
+        <div class="modal-handle"></div>
+        <h2>Beigetretene Spieler:innen</h2>
+        <div class="modal-sub">${t.members.length} beigetreten. ${org ? "Als Turnierleiter kannst du Einzelnen erlauben, Ergebnisse für alle Spiele einzutragen (nicht nur die eigenen)." : ""}</div>
+        <div class="stack">${rows}</div>
+        <button class="btn btn-ghost" style="margin-top:16px;" data-action="closeModal">Schließen</button>
+      </div>
+    </div>`;
   }
 
   function modalDeleteConfirm(){
@@ -1311,6 +1360,7 @@
   function modalScore(){
     const t = state.current;
     const m = findModalMatch();
+    const editable = canEditMatch(t, m);
     const target = t.setTarget || 6;
     const a = state.modalData.a || 0;
     const b = state.modalData.b || 0;
@@ -1330,12 +1380,23 @@
       statusExtra = `${a}:${b}`;
     }
 
+    const stepperB = editable ? `
+              <div class="court-stepper">
+                <button class="court-step-btn" data-action="courtStep" data-team="B" data-delta="-1">–</button>
+                <button class="court-step-btn" data-action="courtStep" data-team="B" data-delta="1">+</button>
+              </div>` : "";
+    const stepperA = editable ? `
+              <div class="court-stepper">
+                <button class="court-step-btn" data-action="courtStep" data-team="A" data-delta="-1">–</button>
+                <button class="court-step-btn" data-action="courtStep" data-team="A" data-delta="1">+</button>
+              </div>` : "";
+
     return `
     <div class="modal-overlay" data-action="closeModalBg">
       <div class="modal" onclick="event.stopPropagation()">
         <div class="modal-handle"></div>
-        <h2>Ergebnis eintragen</h2>
-        <div class="modal-sub">Ein Satz bis ${target} (2 Spiele Vorsprung), bei ${target}:${target} Tiebreak bis ${target+1}.</div>
+        <h2>${editable ? "Ergebnis eintragen" : "Live-Ergebnis"}</h2>
+        <div class="modal-sub">${editable ? `Ein Satz bis ${target} (2 Spiele Vorsprung), bei ${target}:${target} Tiebreak bis ${target+1}.` : "Nur Turnierleiter oder das jeweilige Team können hier eintragen."}</div>
 
         <div class="court-wrap">
           <div class="court">
@@ -1349,19 +1410,13 @@
             <div class="court-half top ${leadB?'leading':''}">
               <div class="court-team-tag">${esc(nameB)}</div>
               <div class="court-score-num">${b}</div>
-              <div class="court-stepper">
-                <button class="court-step-btn" data-action="courtStep" data-team="B" data-delta="-1">–</button>
-                <button class="court-step-btn" data-action="courtStep" data-team="B" data-delta="1">+</button>
-              </div>
+              ${stepperB}
             </div>
 
             <div class="court-half bottom ${leadA?'leading':''}">
               <div class="court-team-tag">${esc(nameA)}</div>
               <div class="court-score-num">${a}</div>
-              <div class="court-stepper">
-                <button class="court-step-btn" data-action="courtStep" data-team="A" data-delta="-1">–</button>
-                <button class="court-step-btn" data-action="courtStep" data-team="A" data-delta="1">+</button>
-              </div>
+              ${stepperA}
             </div>
           </div>
           <div class="court-status-row">
@@ -1372,8 +1427,8 @@
 
         ${state.modalData.error ? `<div class="banner-error" style="margin-top:12px;">${esc(state.modalData.error)}</div>` : ""}
         <div class="stack" style="margin-top:16px;">
-          <button class="btn btn-primary" data-action="saveScore" ${winner?"":"disabled"}>Ergebnis speichern</button>
-          <button class="btn btn-ghost" data-action="closeModal">Abbrechen</button>
+          ${editable ? `<button class="btn btn-primary" data-action="saveScore" ${winner?"":"disabled"}>Ergebnis speichern</button>` : ""}
+          <button class="btn btn-ghost" data-action="closeModal">Schließen</button>
         </div>
       </div>
     </div>`;
@@ -1574,6 +1629,17 @@
     if(action==="switchTab"){ state.tab = el.dataset.tab; return render(); }
 
     if(action==="openInvite"){ state.modal="invite"; return render(); }
+    if(action==="openMembers"){ state.modal="members"; return render(); }
+    if(action==="togglePromote"){
+      const t = state.current;
+      if(!isOrganizer(t)) return;
+      const mem = t.members.find(x=>x.userId===el.dataset.user);
+      if(mem){
+        mem.promoted = !mem.promoted;
+        await saveTournament(t);
+      }
+      return render();
+    }
     if(action==="closeModal" || action==="closeModalBg"){ state.modal=null; state.modalData={}; return render(); }
 
     if(action==="copyCode"){
@@ -1609,16 +1675,25 @@
       return render();
     }
     if(action==="courtStep"){
+      const t = state.current;
+      const m = findModalMatch();
+      if(!canEditMatch(t, m)) return;
       const team = el.dataset.team;
       const delta = parseInt(el.dataset.delta,10);
       const key = team==="A" ? "a" : "b";
-      const target = (state.current && state.current.setTarget) || 6;
+      const target = t.setTarget || 6;
       state.modalData[key] = Math.max(0, Math.min(target+1, (state.modalData[key]||0) + delta));
       state.modalData.error = "";
+      // sofort live speichern, damit Zuschauer den Zwischenstand sehen (nicht erst beim Fertigstellen)
+      m.sets = [{ a: state.modalData.a||0, b: state.modalData.b||0 }];
+      if(t.type==="ko") propagateKO(t);
+      await saveTournament(t);
       return render();
     }
     if(action==="saveScore"){
       const t = state.current;
+      const m = findModalMatch();
+      if(!canEditMatch(t, m)) return;
       const target = t.setTarget || 6;
       const a = state.modalData.a||0, b = state.modalData.b||0;
       const w = setWinner(a,b,target);
@@ -1626,7 +1701,6 @@
         state.modalData.error = `Der Satz ist noch nicht entschieden (bis ${target} mit 2 Spielen Vorsprung, oder Tiebreak bis ${target+1}).`;
         return render();
       }
-      const m = findModalMatch();
       m.sets = [{ a, b }];
       if(t.type==="ko") propagateKO(t);
       await saveTournament(t);
