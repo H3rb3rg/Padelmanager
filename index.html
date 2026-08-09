@@ -416,7 +416,8 @@
     joinLoading: false,
     createError: "",
     pollHandle: null,
-    homeNotice: null
+    homeNotice: null,
+    pendingJoinCode: null
   };
 
   const app = document.getElementById("app");
@@ -510,16 +511,44 @@
   }
 
   // ---------- Domain logic: Liga (ohne feste Teams / Americano-Rotation) ----------
-  function generateAmericanoRounds(players, numRounds){
+  function buildAmericanoCounts(players, existingRounds){
     const ids = players.map(p=>p.id);
-    const n = ids.length;
     const partnerCount = {}, opponentCount = {}, sitOutCount = {};
     ids.forEach(a=>{
       partnerCount[a] = {}; opponentCount[a] = {}; sitOutCount[a] = 0;
       ids.forEach(b=>{ if(a!==b){ partnerCount[a][b]=0; opponentCount[a][b]=0; } });
     });
+    (existingRounds||[]).forEach(rd=>{
+      rd.matches.forEach(m=>{
+        const [a1,a2]=m.pairA, [b1,b2]=m.pairB;
+        if(partnerCount[a1]){ partnerCount[a1][a2] = (partnerCount[a1][a2]||0)+1; partnerCount[a2][a1] = (partnerCount[a2][a1]||0)+1; }
+        if(partnerCount[b1]){ partnerCount[b1][b2] = (partnerCount[b1][b2]||0)+1; partnerCount[b2][b1] = (partnerCount[b2][b1]||0)+1; }
+        m.pairA.forEach(x=> m.pairB.forEach(y=>{
+          if(opponentCount[x]) opponentCount[x][y] = (opponentCount[x][y]||0)+1;
+          if(opponentCount[y]) opponentCount[y][x] = (opponentCount[y][x]||0)+1;
+        }));
+      });
+      (rd.sitOut||[]).forEach(id=>{ if(sitOutCount[id]!=null) sitOutCount[id]++; });
+    });
+    return { partnerCount, opponentCount, sitOutCount };
+  }
+
+  function generateAmericanoRounds(players, numRounds, startIndex, seed){
+    const ids = players.map(p=>p.id);
+    const n = ids.length;
+    let partnerCount, opponentCount, sitOutCount;
+    if(seed){
+      partnerCount = seed.partnerCount; opponentCount = seed.opponentCount; sitOutCount = seed.sitOutCount;
+    } else {
+      partnerCount = {}; opponentCount = {}; sitOutCount = {};
+      ids.forEach(a=>{
+        partnerCount[a] = {}; opponentCount[a] = {}; sitOutCount[a] = 0;
+        ids.forEach(b=>{ if(a!==b){ partnerCount[a][b]=0; opponentCount[a][b]=0; } });
+      });
+    }
     const restCount = n % 4;
     const rounds = [];
+    const base = startIndex || 0;
 
     for(let r=0;r<numRounds;r++){
       let best = null, bestScore = Infinity;
@@ -565,7 +594,7 @@
       });
       best.sitting.forEach(id=> sitOutCount[id]++);
       rounds.push({
-        index: r,
+        index: base + r,
         sitOut: best.sitting,
         matches: best.matches.map(m=>({ id: uid("am"), pairA:m.pairA, pairB:m.pairB, sets:[] }))
       });
@@ -738,6 +767,8 @@
     if(!t.matches) t.matches = [];
     if(!t.ligaRounds) t.ligaRounds = [];
     if(!t.setTarget) t.setTarget = 6;
+    if(t.rueckrunde==null) t.rueckrunde = false;
+    if(t.rueckrundeStartIndex===undefined) t.rueckrundeStartIndex = null;
     return t;
   }
   async function loadTournament(code){
@@ -797,6 +828,44 @@
     state.current = t; state.currentCode = code; state.view = "detail"; state.tab = "table"; state.modal=null;
     startPolling();
     render();
+  }
+
+  async function attemptJoin(code){
+    const t = await loadTournament(code);
+    if(!t) return { ok:false };
+    let mem = t.members.find(m=>m.userId===state.identity.id);
+    if(!mem){
+      mem = { userId: state.identity.id, name: state.identity.name, teamId: null };
+      t.members.push(mem);
+      await saveTournament(t);
+    }
+    await addMyCode(code);
+    return { ok:true, t, mem };
+  }
+
+  async function enterJoinedTournament(t, mem, code){
+    const entities = entityList(t);
+    if(!mem.teamId && entities.length){
+      state.modal = "jointeam";
+      state.modalData = { tournament: t };
+      state.current = t; state.currentCode = code;
+      state.view = "detail"; state.tab="table";
+      startPolling();
+      return render();
+    }
+    return openDetail(code);
+  }
+
+  async function tryAutoJoinFromUrl(){
+    const code = state.pendingJoinCode;
+    if(!code) return;
+    state.pendingJoinCode = null;
+    const res = await attemptJoin(code);
+    if(!res.ok){
+      state.homeNotice = `Kein Turnier mit dem Code „${code}" gefunden — evtl. wurde es gelöscht.`;
+      return render();
+    }
+    return enterJoinedTournament(res.t, res.mem, code);
   }
 
   // ---------- Render: shell ----------
@@ -1054,7 +1123,7 @@
         </div>
         ${state.joinError ? `<div class="banner-error">${esc(state.joinError)}</div>` : ""}
         <button class="btn btn-primary" data-action="submitJoin" ${state.joinLoading?"disabled":""}>${state.joinLoading ? "Verbinde mit Turnierleiter …" : "Beitreten"}</button>
-        <div class="banner-info">Der Code steht in der Einladung des Turnierleiters oder im QR-Code — QR einfach mit einer beliebigen Scanner-App auslesen, der Code erscheint als Text zum Eintippen. Die Verbindung läuft direkt zum Handy des Turnierleiters, das muss die App dafür gerade geöffnet haben.</div>
+        <div class="banner-info">Der Code steht in der Einladung des Turnierleiters. Noch einfacher: den QR-Code scannen — der führt direkt zum Beitritt, ganz ohne Code eintippen.</div>
       </div>
     </div>`;
   }
@@ -1145,6 +1214,9 @@
       html += `<div class="leg-badge">Hinrunde</div>${renderRoundGroupedMatches(t, hin)}<div class="leg-badge">Rückrunde</div>${renderRoundGroupedMatches(t, rueck)}`;
     } else {
       html += t.matches.length ? renderRoundGroupedMatches(t, t.matches) : `<div class="empty">Keine Spiele.</div>`;
+      if(isOrganizer(t)){
+        html += `<button class="btn btn-secondary" style="margin-top:18px;" data-action="startRueckrunde">Rückrunde starten</button>`;
+      }
     }
     return html;
   }
@@ -1168,11 +1240,18 @@
 
   function renderIndividualRounds(t){
     if(!t.ligaRounds.length) return `<div class="empty">Keine Runden.</div>`;
-    return t.ligaRounds.map(rd=>{
+    const rueckStart = t.rueckrundeStartIndex;
+    let html = "";
+    t.ligaRounds.forEach(rd=>{
+      if(rueckStart!=null && rd.index===rueckStart){ html += `<div class="leg-badge">Rückrunde</div>`; }
       const sitNames = rd.sitOut.map(pid=>playerName(t,pid)).join(", ");
       const matches = rd.matches.map(m=>matchCardHtml(t,m,rd.index)).join("");
-      return `<div class="leg-badge">Runde ${rd.index+1}${rd.sitOut.length ? " · Pause: "+esc(sitNames) : ""}</div>${matches}`;
-    }).join("");
+      html += `<div class="leg-badge">Runde ${rd.index+1}${rd.sitOut.length ? " · Pause: "+esc(sitNames) : ""}</div>${matches}`;
+    });
+    if(!t.rueckrunde && isOrganizer(t)){
+      html += `<button class="btn btn-secondary" style="margin-top:18px;" data-action="startRueckrunde">Rückrunde starten (weitere Runden auslosen)</button>`;
+    }
+    return html;
   }
 
   function renderKOBracket(t){
@@ -1355,6 +1434,10 @@
     </div>`;
   }
 
+  function joinUrl(code){
+    return `${window.location.origin}${window.location.pathname}?join=${code}`;
+  }
+
   function modalInvite(){
     const t = state.current;
     return `
@@ -1362,7 +1445,7 @@
       <div class="modal" onclick="event.stopPropagation()">
         <div class="modal-handle"></div>
         <h2>Spieler einladen</h2>
-        <div class="modal-sub">Code teilen oder QR-Code scannen lassen — beide führen zum Beitreten von „${esc(t.name)}".</div>
+        <div class="modal-sub">QR-Code scannen führt direkt zum Beitritt zu „${esc(t.name)}" — kein Code-Eintippen nötig. Alternativ den Code manuell teilen.</div>
         <div class="code-display">${esc(t.code)}</div>
         <div id="qrbox"></div>
         <div class="stack">
@@ -1490,7 +1573,7 @@
     if(qrbox && state.current && window.QRCode){
       qrbox.innerHTML = "";
       try{
-        new QRCode(qrbox, { text: state.current.code, width:180, height:180, colorDark:"#0A211D", colorLight:"#ffffff" });
+        new QRCode(qrbox, { text: joinUrl(state.current.code), width:180, height:180, colorDark:"#0A211D", colorLight:"#ffffff" });
       }catch(e){ qrbox.innerHTML = '<div style="color:#333;padding:20px;">QR nicht verfügbar</div>'; }
     }
   }
@@ -1502,7 +1585,9 @@
       const val = document.getElementById("nameInput").value.trim();
       if(!val) return;
       state.identity = await saveIdentity(val);
-      return goHome();
+      await goHome();
+      if(state.pendingJoinCode) return tryAutoJoinFromUrl();
+      return;
     }
     if(action==="goHome") return goHome();
     if(action==="goCreate"){ state.draft = { name:"", type:"liga", ligaMode:"teams", rueckrunde:false, rounds:6, teams:[], players:[] }; state.createError=""; state.view="create"; return render(); }
@@ -1620,29 +1705,13 @@
       if(!code){ state.joinError="Bitte Code eingeben."; return render(); }
       state.joinLoading = true; state.joinError = "";
       render();
-      const t = await loadTournament(code);
+      const res = await attemptJoin(code);
       state.joinLoading = false;
-      if(!t){
+      if(!res.ok){
         state.joinError = "Kein Turnier mit diesem Code gefunden.";
         return render();
       }
-      let mem = t.members.find(m=>m.userId===state.identity.id);
-      if(!mem){
-        mem = { userId: state.identity.id, name: state.identity.name, teamId: null };
-        t.members.push(mem);
-        await saveTournament(t);
-      }
-      await addMyCode(code);
-      const entities = entityList(t);
-      if(!mem.teamId && entities.length){
-        state.modal = "jointeam";
-        state.modalData = { tournament: t };
-        state.current = t; state.currentCode = code;
-        state.view = "detail"; state.tab="table";
-        startPolling();
-        return render();
-      }
-      return openDetail(code);
+      return enterJoinedTournament(res.t, res.mem, code);
     }
 
     if(action==="openDetail") return openDetail(el.dataset.code);
@@ -1674,6 +1743,27 @@
     }
 
     if(action==="switchTab"){ state.tab = el.dataset.tab; return render(); }
+
+    if(action==="startRueckrunde"){
+      const t = state.current;
+      if(!isOrganizer(t) || t.rueckrunde) return;
+      if(t.type==="liga" && t.ligaMode==="teams"){
+        const rueck = buildLegMatches(t.teams, "Rueck", t.courts||1).map(m=>({ ...m, teamAId:m.teamBId, teamBId:m.teamAId }));
+        t.matches = t.matches.concat(rueck);
+        t.rueckrunde = true;
+      } else if(t.type==="liga" && t.ligaMode==="individual"){
+        const extra = t.rounds || 6;
+        const seed = buildAmericanoCounts(t.players, t.ligaRounds);
+        const newRounds = generateAmericanoRounds(t.players, extra, t.ligaRounds.length, seed);
+        t.rueckrundeStartIndex = t.ligaRounds.length;
+        t.ligaRounds = t.ligaRounds.concat(newRounds);
+        t.rueckrunde = true;
+      } else {
+        return;
+      }
+      await saveTournament(t);
+      return render();
+    }
 
     if(action==="openInvite"){ state.modal="invite"; return render(); }
     if(action==="openMembers"){ state.modal="members"; return render(); }
@@ -1726,7 +1816,7 @@
     }
     if(action==="shareInvite"){
       const t = state.current;
-      const text = `Du bist eingeladen zum Padel-Turnier „${t.name}"! Tritt in der App über den Code bei:\n\n${t.code}`;
+      const text = `Du bist eingeladen zum Padel-Turnier „${t.name}"! Einfach antippen zum Beitreten:\n${joinUrl(t.code)}\n\nOder den Code manuell eingeben: ${t.code}`;
       if(navigator.share){ try{ await navigator.share({ title: "Padel Turnier Einladung", text }); }catch(e){} }
       else { try{ await navigator.clipboard.writeText(text); el.textContent="Text kopiert ✓"; setTimeout(()=>render(),1400);}catch(e){} }
       return;
@@ -1788,11 +1878,21 @@
 
   // ---------- Boot ----------
   async function boot(){
+    try{
+      const params = new URLSearchParams(window.location.search);
+      const joinParam = params.get("join");
+      if(joinParam){
+        state.pendingJoinCode = joinParam.trim().toUpperCase();
+        history.replaceState(null, "", window.location.pathname);
+      }
+    }catch(e){ /* ignore malformed URLs */ }
+
     state.identity = await loadIdentity();
     if(!state.identity){ state.view = "onboarding"; return render(); }
     await refreshMyTournamentsList();
     state.view = "home";
     render();
+    if(state.pendingJoinCode) await tryAutoJoinFromUrl();
   }
   boot();
 
