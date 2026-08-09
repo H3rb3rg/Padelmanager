@@ -1242,6 +1242,8 @@
     if(state.modal==="jointeam") return modalJoinTeam();
     if(state.modal==="deleteConfirm") return modalDeleteConfirm();
     if(state.modal==="members") return modalMembers();
+    if(state.modal==="reassignTeam") return modalReassignTeam();
+    if(state.modal==="removeMember") return modalRemoveMember();
     return "";
   }
 
@@ -1261,9 +1263,13 @@
       else if(mem.promoted) roleBadge = "Darf alle Ergebnisse eintragen";
       else if(!mem.teamId) roleBadge = "Zuschauer:in";
 
-      const canPromote = org && !isOrg;
-      const promoteBtn = canPromote ? `
-        <button class="btn ${mem.promoted?'btn-secondary':'btn-ghost'} btn-sm" data-action="togglePromote" data-user="${esc(mem.userId)}">
+      const canManage = org && !isOrg;
+      const orgControls = canManage ? `
+        <div class="row" style="margin:-4px 0 6px 0; gap:8px;">
+          <button class="btn btn-secondary btn-sm" style="flex:1;" data-action="openReassign" data-user="${esc(mem.userId)}" data-name="${esc(mem.name)}">Team ändern</button>
+          <button class="btn btn-danger btn-sm" style="flex:1;" data-action="openRemoveMember" data-user="${esc(mem.userId)}" data-name="${esc(mem.name)}">Entfernen</button>
+        </div>
+        <button class="btn ${mem.promoted?'btn-secondary':'btn-ghost'} btn-sm" style="width:100%; margin-bottom:10px;" data-action="togglePromote" data-user="${esc(mem.userId)}">
           ${mem.promoted ? "Berechtigung entziehen" : "Für alle Spiele befördern"}
         </button>` : "";
 
@@ -1275,7 +1281,7 @@
           <div class="t-players">${esc(memberEntityLabel(t, mem))} · ${esc(roleBadge)}</div>
         </div>
       </div>
-      ${promoteBtn ? `<div style="margin:-4px 0 4px 0;">${promoteBtn}</div>` : ""}`;
+      ${orgControls}`;
     }).join("");
 
     return `
@@ -1283,9 +1289,50 @@
       <div class="modal" onclick="event.stopPropagation()">
         <div class="modal-handle"></div>
         <h2>Beigetretene Spieler:innen</h2>
-        <div class="modal-sub">${t.members.length} beigetreten. ${org ? "Als Turnierleiter kannst du Einzelnen erlauben, Ergebnisse für alle Spiele einzutragen (nicht nur die eigenen)." : ""}</div>
+        <div class="modal-sub">${t.members.length} beigetreten. ${org ? "Als Turnierleiter kannst du Teams korrigieren, Ergebnis-Rechte vergeben oder Personen entfernen." : ""}</div>
         <div class="stack">${rows}</div>
         <button class="btn btn-ghost" style="margin-top:16px;" data-action="closeModal">Schließen</button>
+      </div>
+    </div>`;
+  }
+
+  function modalReassignTeam(){
+    const t = state.current;
+    const { userId, name } = state.modalData;
+    const entities = entityList(t);
+    const rows = entities.map(en=>`
+      <div class="radio-team" data-action="setMemberTeam" data-user="${esc(userId)}" data-team="${en.id}">
+        <div class="team-avatar">${esc((en.name[0]||"?").toUpperCase())}</div>
+        <div class="t-info"><div class="t-name">${esc(en.name)}</div>${en.sub ? `<div class="t-players">${esc(en.sub)}</div>` : ""}</div>
+      </div>`).join("");
+    return `
+    <div class="modal-overlay" data-action="closeModalBg">
+      <div class="modal" onclick="event.stopPropagation()">
+        <div class="modal-handle"></div>
+        <h2>Team ändern</h2>
+        <div class="modal-sub">Neue Zuordnung für ${esc(name)} wählen — nützlich, falls sich jemand beim Beitreten vertippt hat.</div>
+        ${rows}
+        <div class="radio-team" data-action="setMemberTeam" data-user="${esc(userId)}" data-team="">
+          <div class="team-avatar">👁</div>
+          <div class="t-info"><div class="t-name">Kein Team</div><div class="t-players">Nur Zuschauer:in</div></div>
+        </div>
+        <button class="btn btn-ghost" style="margin-top:12px;" data-action="backToMembers">Abbrechen</button>
+      </div>
+    </div>`;
+  }
+
+  function modalRemoveMember(){
+    const { userId, name } = state.modalData;
+    return `
+    <div class="modal-overlay" data-action="closeModalBg">
+      <div class="modal" onclick="event.stopPropagation()">
+        <div class="modal-handle"></div>
+        <h2>Mitspieler:in entfernen?</h2>
+        <div class="modal-sub">„${esc(name)}" wird aus dem Turnier entfernt und verliert alle Rechte. Ein erneuter Beitritt über den Einladungscode ist jederzeit wieder möglich.</div>
+        <div class="stack">
+          <button class="btn btn-danger" style="border:1px solid var(--coral); background:rgba(228,87,46,0.12);" data-action="confirmRemoveMember" data-user="${esc(userId)}">Entfernen</button>
+          <button class="btn btn-ghost" data-action="backToMembers">Abbrechen</button>
+        </div>
       </div>
     </div>`;
   }
@@ -1640,6 +1687,36 @@
       }
       return render();
     }
+    if(action==="openReassign"){
+      state.modal = "reassignTeam";
+      state.modalData = { userId: el.dataset.user, name: el.dataset.name };
+      return render();
+    }
+    if(action==="setMemberTeam"){
+      const t = state.current;
+      if(!isOrganizer(t)) return;
+      const mem = t.members.find(x=>x.userId===el.dataset.user);
+      if(mem) mem.teamId = el.dataset.team || null;
+      await saveTournament(t);
+      state.modal = "members"; state.modalData = {};
+      return render();
+    }
+    if(action==="openRemoveMember"){
+      state.modal = "removeMember";
+      state.modalData = { userId: el.dataset.user, name: el.dataset.name };
+      return render();
+    }
+    if(action==="confirmRemoveMember"){
+      const t = state.current;
+      if(!isOrganizer(t)) return;
+      const idx = t.members.findIndex(x=>x.userId===el.dataset.user);
+      if(idx>=0) t.members.splice(idx,1);
+      await saveTournament(t);
+      state.modal = "members"; state.modalData = {};
+      return render();
+    }
+    if(action==="backToMembers"){ state.modal = "members"; state.modalData = {}; return render(); }
+
     if(action==="closeModal" || action==="closeModalBg"){ state.modal=null; state.modalData={}; return render(); }
 
     if(action==="copyCode"){
