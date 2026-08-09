@@ -417,7 +417,8 @@
     createError: "",
     pollHandle: null,
     homeNotice: null,
-    pendingJoinCode: null
+    pendingJoinCode: null,
+    matchFilter: "all" // "all" | "mine"
   };
 
   const app = document.getElementById("app");
@@ -436,9 +437,16 @@
 
   // Shape-agnostic: works for team matches, pair (individual) matches and KO matches.
   // match.sets hält genau einen Eintrag {a,b} (oder ist leer, solange noch nicht gespielt).
+  // match.forced=true bedeutet: manuell vorzeitig beendet (z. B. 4:3), Gewinner = höhere Zahl.
   function evaluateMatch(match, target){
     const s = (match.sets && match.sets[0]) || null;
-    const w = s ? setWinner(s.a, s.b, target) : null;
+    if(!s) return { winsA:0, winsB:0, winnerSide:null, completed:false };
+    let w;
+    if(match.forced){
+      w = s.a===s.b ? null : (s.a>s.b ? "A" : "B");
+    } else {
+      w = setWinner(s.a, s.b, target);
+    }
     const winsA = w==="A" ? 1 : 0;
     const winsB = w==="B" ? 1 : 0;
     return { winsA, winsB, winnerSide: w, completed: !!w };
@@ -724,6 +732,14 @@
     if(!mem) return false;
     if(mem.promoted) return true;
     if(!mem.teamId) return false;
+    if(match.pairA) return match.pairA.includes(mem.teamId) || match.pairB.includes(mem.teamId);
+    if(match.teamAId==null || match.teamBId==null) return false;
+    return mem.teamId===match.teamAId || mem.teamId===match.teamBId;
+  }
+
+  function isMyMatch(t, match){
+    const mem = myMembership(t);
+    if(!mem || !mem.teamId) return false;
     if(match.pairA) return match.pairA.includes(mem.teamId) || match.pairB.includes(mem.teamId);
     if(match.teamAId==null || match.teamBId==null) return false;
     return mem.teamId===match.teamAId || mem.teamId===match.teamBId;
@@ -1157,7 +1173,8 @@
     let statusText;
     if(m.bye) statusText = esc((winA?nameA:nameB)) + " kommt kampflos weiter";
     else if(pending) statusText = "Ausstehend";
-    else statusText = ev.completed ? "Beendet" : (m.sets.length ? "Läuft" : "Ausstehend");
+    else if(ev.completed) statusText = m.forced ? "Beendet (manuell)" : "Beendet";
+    else statusText = m.sets.length ? "Läuft" : "Ausstehend";
 
     const cardClickAttr = (viewable && !editable) ? ` data-action="openScore" data-match="${m.id}"${roundAttr} style="cursor:pointer;"` : "";
 
@@ -1186,7 +1203,7 @@
       <tbody>
         ${standings.map((r,i)=>`
           <tr>
-            <td class="left"><span class="rank">${i+1}</span>&nbsp; ${esc(r.team.name)}</td>
+            <td class="left" data-action="openTeamMatches" data-team="${esc(r.team.id)}" style="cursor:pointer;"><span class="rank">${i+1}</span>&nbsp; ${esc(r.team.name)}</td>
             <td>${r.played}</td>
             <td>${r.wins}</td>
             <td>${r.losses}</td>
@@ -1197,7 +1214,16 @@
     </table>`;
   }
 
+  function matchFilterToggle(){
+    return `
+    <div class="tabs" style="margin-bottom:14px;">
+      <div class="tab ${state.matchFilter!=='mine'?'active':''}" data-action="setMatchFilter" data-filter="all">Alle Spiele</div>
+      <div class="tab ${state.matchFilter==='mine'?'active':''}" data-action="setMatchFilter" data-filter="mine">Meine Spiele</div>
+    </div>`;
+  }
+
   function renderRoundGroupedMatches(t, matches){
+    if(!matches.length) return `<div class="empty">Keine Spiele.</div>`;
     const roundNums = [...new Set(matches.map(m=>m.round))].sort((a,b)=>a-b);
     return roundNums.map(rn=>{
       const roundMatches = matches.filter(m=>m.round===rn);
@@ -1207,16 +1233,21 @@
 
   function renderTeamMatches(t){
     const courts = t.courts || 1;
+    const mine = state.matchFilter==="mine";
+    const pool = mine ? t.matches.filter(m=>isMyMatch(t,m)) : t.matches;
     let html = `<div class="banner-info" style="margin-bottom:14px;">🏟 ${courts} Court${courts>1?'s':''} — bis zu ${courts} Spiel${courts>1?'e':''} pro Runde parallel.</div>`;
-    if(t.rueckrunde){
-      const hin = t.matches.filter(m=>m.leg!=="Rueck");
-      const rueck = t.matches.filter(m=>m.leg==="Rueck");
+    html += matchFilterToggle();
+    if(mine && !myMembership(t)?.teamId){
+      html += `<div class="empty">Du bist keinem Team zugeordnet.</div>`;
+    } else if(t.rueckrunde){
+      const hin = pool.filter(m=>m.leg!=="Rueck");
+      const rueck = pool.filter(m=>m.leg==="Rueck");
       html += `<div class="leg-badge">Hinrunde</div>${renderRoundGroupedMatches(t, hin)}<div class="leg-badge">Rückrunde</div>${renderRoundGroupedMatches(t, rueck)}`;
     } else {
-      html += t.matches.length ? renderRoundGroupedMatches(t, t.matches) : `<div class="empty">Keine Spiele.</div>`;
-      if(isOrganizer(t)){
-        html += `<button class="btn btn-secondary" style="margin-top:18px;" data-action="startRueckrunde">Rückrunde starten</button>`;
-      }
+      html += renderRoundGroupedMatches(t, pool);
+    }
+    if(!mine && !t.rueckrunde && isOrganizer(t)){
+      html += `<button class="btn btn-secondary" style="margin-top:18px;" data-action="startRueckrunde">Rückrunde starten</button>`;
     }
     return html;
   }
@@ -1239,16 +1270,25 @@
   }
 
   function renderIndividualRounds(t){
-    if(!t.ligaRounds.length) return `<div class="empty">Keine Runden.</div>`;
+    const mine = state.matchFilter==="mine";
+    let html = matchFilterToggle();
+    if(mine && !myMembership(t)?.teamId){
+      return html + `<div class="empty">Du bist keinem Spieler zugeordnet.</div>`;
+    }
+    if(!t.ligaRounds.length) return html + `<div class="empty">Keine Runden.</div>`;
     const rueckStart = t.rueckrundeStartIndex;
-    let html = "";
+    let any = false;
     t.ligaRounds.forEach(rd=>{
+      const matches = mine ? rd.matches.filter(m=>isMyMatch(t,m)) : rd.matches;
+      if(mine && !matches.length) return;
+      any = true;
       if(rueckStart!=null && rd.index===rueckStart){ html += `<div class="leg-badge">Rückrunde</div>`; }
       const sitNames = rd.sitOut.map(pid=>playerName(t,pid)).join(", ");
-      const matches = rd.matches.map(m=>matchCardHtml(t,m,rd.index)).join("");
-      html += `<div class="leg-badge">Runde ${rd.index+1}${rd.sitOut.length ? " · Pause: "+esc(sitNames) : ""}</div>${matches}`;
+      const matchesHtml = matches.map(m=>matchCardHtml(t,m,rd.index)).join("");
+      html += `<div class="leg-badge">Runde ${rd.index+1}${rd.sitOut.length ? " · Pause: "+esc(sitNames) : ""}</div>${matchesHtml}`;
     });
-    if(!t.rueckrunde && isOrganizer(t)){
+    if(!any) html += `<div class="empty">Keine eigenen Spiele.</div>`;
+    if(!mine && !t.rueckrunde && isOrganizer(t)){
       html += `<button class="btn btn-secondary" style="margin-top:18px;" data-action="startRueckrunde">Rückrunde starten (weitere Runden auslosen)</button>`;
     }
     return html;
@@ -1256,17 +1296,26 @@
 
   function renderKOBracket(t){
     if(!t.matches.length) return `<div class="empty">Kein Turnierbaum.</div>`;
+    const mine = state.matchFilter==="mine";
     const maxRound = Math.max(...t.matches.map(m=>m.roundIndex));
     const totalRounds = maxRound+1;
-    let html = "";
+    let html = matchFilterToggle();
     if(t.champion){
       html += `<div class="champion-banner">🏆 Turniersieger: ${esc(teamName(t,t.champion))}</div>`;
     }
+    if(mine && !myMembership(t)?.teamId){
+      return html + `<div class="empty">Du bist keinem Team zugeordnet.</div>`;
+    }
+    let any = false;
     for(let r=0;r<=maxRound;r++){
-      const matches = t.matches.filter(m=>m.roundIndex===r).sort((a,b)=>a.slotIndex-b.slotIndex);
+      let matches = t.matches.filter(m=>m.roundIndex===r).sort((a,b)=>a.slotIndex-b.slotIndex);
+      if(mine) matches = matches.filter(m=>isMyMatch(t,m));
+      if(mine && !matches.length) continue;
+      any = true;
       html += `<div class="leg-badge">${esc(roundName(r,totalRounds))}</div>`;
       html += matches.map(m=>matchCardHtml(t,m,null)).join("");
     }
+    if(mine && !any) html += `<div class="empty">Keine eigenen Spiele (evtl. schon ausgeschieden).</div>`;
     return html;
   }
 
@@ -1323,7 +1372,34 @@
     if(state.modal==="members") return modalMembers();
     if(state.modal==="reassignTeam") return modalReassignTeam();
     if(state.modal==="removeMember") return modalRemoveMember();
+    if(state.modal==="teamMatches") return modalTeamMatches();
     return "";
+  }
+
+  function modalTeamMatches(){
+    const t = state.current;
+    const teamId = state.modalData.teamId;
+    const name = teamName(t, teamId);
+    const matches = t.matches.filter(m=> m.teamAId===teamId || m.teamBId===teamId);
+    let body;
+    if(t.rueckrunde){
+      const hin = matches.filter(m=>m.leg!=="Rueck");
+      const rueck = matches.filter(m=>m.leg==="Rueck");
+      body = (hin.length ? `<div class="leg-badge">Hinrunde</div>${hin.map(m=>matchCardHtml(t,m,null)).join("")}` : "")
+           + (rueck.length ? `<div class="leg-badge">Rückrunde</div>${rueck.map(m=>matchCardHtml(t,m,null)).join("")}` : "");
+    } else {
+      body = matches.length ? matches.map(m=>matchCardHtml(t,m,null)).join("") : `<div class="empty">Keine Spiele.</div>`;
+    }
+    return `
+    <div class="modal-overlay" data-action="closeModalBg">
+      <div class="modal" onclick="event.stopPropagation()">
+        <div class="modal-handle"></div>
+        <h2>${esc(name)}</h2>
+        <div class="modal-sub">Alle Spiele dieses Teams.</div>
+        <div class="stack">${body}</div>
+        <button class="btn btn-ghost" style="margin-top:16px;" data-action="closeModal">Schließen</button>
+      </div>
+    </div>`;
   }
 
   function memberEntityLabel(t, mem){
@@ -1496,7 +1572,7 @@
     const b = state.modalData.b || 0;
     const nameA = sideLabel(t,m,"A");
     const nameB = sideLabel(t,m,"B");
-    const winner = setWinner(a,b,target);
+    const winner = m.forced ? (a===b ? null : (a>b?"A":"B")) : setWinner(a,b,target);
     const tiebreak = a>=target && b>=target && !winner;
     const leadA = a>b, leadB = b>a;
 
@@ -1558,6 +1634,7 @@
         ${state.modalData.error ? `<div class="banner-error" style="margin-top:12px;">${esc(state.modalData.error)}</div>` : ""}
         <div class="stack" style="margin-top:16px;">
           ${editable ? `<button class="btn btn-primary" data-action="saveScore" ${winner?"":"disabled"}>Ergebnis speichern</button>` : ""}
+          ${(editable && !winner && a!==b) ? `<button class="btn btn-ghost" data-action="forceFinish">Satz jetzt beenden (${a}:${b})</button>` : ""}
           <button class="btn btn-ghost" data-action="closeModal">Schließen</button>
         </div>
       </div>
@@ -1743,6 +1820,12 @@
     }
 
     if(action==="switchTab"){ state.tab = el.dataset.tab; return render(); }
+    if(action==="setMatchFilter"){ state.matchFilter = el.dataset.filter; return render(); }
+    if(action==="openTeamMatches"){
+      state.modal = "teamMatches";
+      state.modalData = { teamId: el.dataset.team };
+      return render();
+    }
 
     if(action==="startRueckrunde"){
       const t = state.current;
@@ -1853,6 +1936,7 @@
       state.modalData.error = "";
       // sofort live speichern, damit Zuschauer den Zwischenstand sehen (nicht erst beim Fertigstellen)
       m.sets = [{ a: state.modalData.a||0, b: state.modalData.b||0 }];
+      m.forced = false;
       if(t.type==="ko") propagateKO(t);
       await saveTournament(t);
       return render();
@@ -1869,6 +1953,20 @@
         return render();
       }
       m.sets = [{ a, b }];
+      m.forced = false;
+      if(t.type==="ko") propagateKO(t);
+      await saveTournament(t);
+      state.modal = null; state.modalData = {};
+      return render();
+    }
+    if(action==="forceFinish"){
+      const t = state.current;
+      const m = findModalMatch();
+      if(!canEditMatch(t, m)) return;
+      const a = state.modalData.a||0, b = state.modalData.b||0;
+      if(a===b) return;
+      m.sets = [{ a, b }];
+      m.forced = true;
       if(t.type==="ko") propagateKO(t);
       await saveTournament(t);
       state.modal = null; state.modalData = {};
