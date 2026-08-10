@@ -456,6 +456,11 @@
   // Shape-agnostic: works for team matches, pair (individual) matches and KO matches.
   // match.sets hält genau einen Eintrag {a,b} (oder ist leer, solange noch nicht gespielt).
   // match.forced=true bedeutet: manuell vorzeitig beendet (z. B. 4:3), Gewinner = höhere Zahl.
+  // match.confirmed=true bedeutet: explizit über "Ergebnis speichern" bestätigt — erst dann gilt
+  // das Match offiziell als beendet (Tabelle, K.-o.-Aufstieg, Turniersieger). Der laufende
+  // Zwischenstand (jeder Tastendruck) wird zwar live gespeichert und angezeigt, zählt aber nicht
+  // automatisch als Ergebnis, nur weil die Zahlen zufällig schon eine Siegbedingung erfüllen.
+  // Ältere Matches ohne dieses Feld gelten weiterhin als bestätigt (Rückwärtskompatibilität).
   function evaluateMatch(match, target){
     const s = (match.sets && match.sets[0]) || null;
     if(!s) return { winsA:0, winsB:0, winnerSide:null, completed:false };
@@ -465,9 +470,11 @@
     } else {
       w = setWinner(s.a, s.b, target);
     }
-    const winsA = w==="A" ? 1 : 0;
-    const winsB = w==="B" ? 1 : 0;
-    return { winsA, winsB, winnerSide: w, completed: !!w };
+    const confirmed = !!match.forced || match.confirmed !== false;
+    const winnerSide = confirmed ? w : null;
+    const winsA = winnerSide==="A" ? 1 : 0;
+    const winsB = winnerSide==="B" ? 1 : 0;
+    return { winsA, winsB, winnerSide, completed: !!winnerSide };
   }
 
   // ---------- Domain logic: Liga (feste Teams) ----------
@@ -956,7 +963,17 @@
         }
         if(JSON.stringify(fresh)!==JSON.stringify(state.current)){
           state.current = fresh;
-          if(!state.modal) render();
+          if(!state.modal){
+            render();
+          } else if(state.modal==="score"){
+            const m = findModalMatch();
+            if(m){
+              const s = m.sets[0];
+              state.modalData.a = s ? s.a : (state.modalData.a||0);
+              state.modalData.b = s ? s.b : (state.modalData.b||0);
+              render();
+            }
+          }
         }
         return;
       }
@@ -991,12 +1008,19 @@
 
   async function refreshGroupTournaments(g){
     const results = [];
+    let staleFound = false;
+    const validCodes = [];
     for(const code of (g.tournamentCodes||[])){
       const t = await loadTournament(code);
-      if(t) results.push(t);
+      if(t){ results.push(t); validCodes.push(code); }
+      else { staleFound = true; }
     }
     results.sort((a,b)=> (b.updatedAt||0) - (a.updatedAt||0));
     state.currentGroupTournaments = results;
+    if(staleFound){
+      g.tournamentCodes = validCodes;
+      await saveGroup(g);
+    }
   }
 
   async function openGroupDetail(code){
@@ -1180,8 +1204,8 @@
           Noch in keiner Gruppe. Feste Spielrunden legen hier gemeinsam Turniere an.
         </div>` }
       <div class="stack" style="margin-top:14px; margin-bottom:28px;">
-        <button class="btn btn-secondary" data-action="goCreateGroup">+ Neue Gruppe erstellen</button>
-        <button class="btn btn-ghost" data-action="goJoinGroup">Gruppe per Code beitreten</button>
+        <button class="btn btn-primary" data-action="goCreateGroup">+ Neue Gruppe erstellen</button>
+        <button class="btn btn-secondary" data-action="goJoinGroup">Gruppe per Code beitreten</button>
       </div>
 
       <div class="section-title">Meine Turniere</div>
@@ -2591,18 +2615,30 @@
 
     if(action==="deleteTournament"){
       const code = el.dataset.code;
-      const cached = (state.myTournaments||[]).find(x=>x.code===code);
+      const cached = (state.myTournaments||[]).find(x=>x.code===code) || (state.currentGroupTournaments||[]).find(x=>x.code===code);
       const t = (state.current && state.current.code===code) ? state.current : cached;
       const isOrg = t ? isOrganizer(t) : false;
       const name = t ? t.name : code;
+      const groupCode = t ? t.groupCode : null;
       state.modal = "deleteConfirm";
-      state.modalData = { code, isOrg, name };
+      state.modalData = { code, isOrg, name, groupCode };
       return render();
     }
     if(action==="confirmDelete"){
-      const { code, isOrg } = state.modalData;
+      const { code, isOrg, groupCode } = state.modalData;
       if(isOrg){
         await sDelete("tournament:"+code, true);
+        if(groupCode){
+          const g = await loadGroup(groupCode);
+          if(g){
+            g.tournamentCodes = (g.tournamentCodes||[]).filter(c=>c!==code);
+            await saveGroup(g);
+            if(state.currentGroupCode===groupCode){
+              state.currentGroup = g;
+              await refreshGroupTournaments(g);
+            }
+          }
+        }
       }
       await removeMyCode(code);
       if(state.currentCode===code){
@@ -2802,9 +2838,11 @@
       const target = t.setTarget || 6;
       state.modalData[key] = Math.max(0, Math.min(target+1, (state.modalData[key]||0) + delta));
       state.modalData.error = "";
-      // sofort live speichern, damit Zuschauer den Zwischenstand sehen (nicht erst beim Fertigstellen)
+      // sofort live speichern, damit Zuschauer den Zwischenstand sehen — zählt aber erst nach
+      // explizitem "Ergebnis speichern" als offiziell beendet (siehe evaluateMatch).
       m.sets = [{ a: state.modalData.a||0, b: state.modalData.b||0 }];
       m.forced = false;
+      m.confirmed = false;
       if(t.type==="ko") propagateKO(t);
       await saveTournament(t);
       return render();
@@ -2822,6 +2860,7 @@
       }
       m.sets = [{ a, b }];
       m.forced = false;
+      m.confirmed = true;
       if(t.type==="ko") propagateKO(t);
       await saveTournament(t);
       state.modal = null; state.modalData = {};
@@ -2835,6 +2874,7 @@
       if(a===b) return;
       m.sets = [{ a, b }];
       m.forced = true;
+      m.confirmed = true;
       if(t.type==="ko") propagateKO(t);
       await saveTournament(t);
       state.modal = null; state.modalData = {};
