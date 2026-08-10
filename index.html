@@ -827,6 +827,7 @@
     if(t.finished==null) t.finished = false;
     if(t.pointsAwarded==null) t.pointsAwarded = false;
     if(t.started==null) t.started = true; // ältere Turniere liefen schon immer sofort los
+    if(!t.groupMemberRoster) t.groupMemberRoster = [];
     return t;
   }
   async function loadTournament(code){
@@ -1003,6 +1004,7 @@
     const t = await loadTournament(code);
     if(!t){ return goHome(); }
     state.current = t; state.currentCode = code; state.view = "detail"; state.tab = "table"; state.modal=null;
+    state.teamPickSelection = [];
     startPolling();
     render();
   }
@@ -1373,7 +1375,7 @@
     return `
     <div class="topbar">
       <div class="back-btn" data-action="backToStep1">←</div>
-      <div><h1>Teams</h1><div class="sub">Schritt 2 von 2 · mind. ${min} Teams</div></div>
+      <div><h1>Teams</h1><div class="sub">Schritt 2 von 2 · ${inGroup ? "Teams sind optional, könnt ihr auch später bilden" : `mind. ${min} Teams`}</div></div>
     </div>
     <div class="screen" style="padding-top:6px;">
       <div class="stack">
@@ -1388,8 +1390,8 @@
         <div class="banner-info">Legt fest, wie viele Spiele gleichzeitig laufen können — die Liga wird in passende Runden eingeteilt statt alles hintereinander aufzulisten.</div>
         ` : ""}
         ${inGroup
-          ? `<div class="banner-info">Das Turnier wird angelegt, der Spielplan wird aber erst erstellt, sobald der Turnierleiter im Turnier auf "Turnier starten" tippt.</div>
-             <button class="btn btn-primary" data-action="startTournament" ${d.teams.length<min?"disabled":""}>Turnier anlegen</button>`
+          ? `<div class="banner-info">Ihr könnt das Turnier auch ganz ohne oder mit nur einem Team anlegen — Mitglieder bilden ihre Teams dann selbstständig im Turnier, bis der Turnierleiter auf "Turnier starten" tippt. Danach stehen die Teams fest.</div>
+             <button class="btn btn-primary" data-action="startTournament">Turnier anlegen</button>`
           : `<div class="banner-info">${d.type==='ko' ? 'Sobald der Turnierbaum ausgelost ist, können keine Teams mehr ergänzt werden.' : 'Sobald der Spielplan erstellt ist, können keine Teams mehr ergänzt werden.'}</div>
              <button class="btn btn-primary" data-action="startTournament" ${d.teams.length<min?"disabled":""}>${d.type==='ko' ? 'Turnierbaum auslosen & Turnier starten' : 'Spielplan erstellen & Turnier starten'}</button>`}
       </div>
@@ -1689,6 +1691,15 @@
     return html;
   }
 
+  function canFormTeams(t){
+    if(isOrganizer(t)) return true;
+    return (t.groupMemberRoster||[]).some(m=>m.userId===state.identity.id);
+  }
+  function canRemoveLiveTeam(t, team){
+    if(isOrganizer(t)) return true;
+    return (team.memberUserIds||[]).includes(state.identity.id);
+  }
+
   function renderFormingState(t){
     const org = isOrganizer(t);
     const isIndividual = t.type==="liga" && t.ligaMode==="individual";
@@ -1700,9 +1711,44 @@
     } else {
       const min = t.type==="ko" ? 2 : 3;
       html += `<div class="section-title">Teams (${t.teams.length}${t.teams.length<min?` · mind. ${min} nötig`:''})</div>`;
-      html += t.teams.length ? t.teams.map((team,i)=>`
-        <div class="team-row"><div class="team-avatar">${i+1}</div><div class="t-info"><div class="t-name">${esc(team.name)}</div><div class="t-players">${[team.p1,team.p2].filter(Boolean).map(esc).join(" & ")}</div></div></div>`).join("")
-        : `<div class="empty">Noch keine Teams gebildet.</div>`;
+      html += t.teams.length ? t.teams.map((team,i)=>{
+        const removable = canRemoveLiveTeam(t, team);
+        return `
+        <div class="team-row">
+          <div class="team-avatar">${i+1}</div>
+          <div class="t-info"><div class="t-name">${esc(team.name)}</div><div class="t-players">${[team.p1,team.p2].filter(Boolean).map(esc).join(" & ")}</div></div>
+          ${removable ? `<button class="icon-btn" data-action="removeLiveTeam" data-team="${esc(team.id)}">✕</button>` : ""}
+        </div>`;
+      }).join("") : `<div class="empty">Noch keine Teams gebildet.</div>`;
+
+      if(canFormTeams(t)){
+        const assignedIds = new Set(t.teams.flatMap(tm=>tm.memberUserIds||[]));
+        const available = (t.groupMemberRoster||[]).filter(m=>!assignedIds.has(m.userId));
+        const pickRows = available.map(m=>{
+          const picked = state.teamPickSelection.includes(m.userId);
+          return `
+          <div class="radio-team ${picked?'pick-selected':''}" data-action="toggleTeamPick" data-user="${esc(m.userId)}">
+            <div class="team-avatar">${esc((m.name[0]||"?").toUpperCase())}</div>
+            <div class="t-info"><div class="t-name">${esc(m.name)}</div></div>
+            <div class="pick-check">${picked?"✓":""}</div>
+          </div>`;
+        }).join("");
+
+        html += `<div class="section-title">Team bilden</div>`;
+        html += available.length ? pickRows : `<div class="empty">Alle Gruppenmitglieder sind schon einem Team zugeordnet.</div>`;
+        if(available.length){
+          html += `
+          <div class="card">
+            <div class="stack">
+              <div class="field">
+                <label>Teamname (optional)</label>
+                <input class="input" id="groupTeamName" placeholder="Vorname & Vorname">
+              </div>
+              <button class="btn btn-secondary" data-action="addLiveTeam" ${state.teamPickSelection.length!==2?"disabled":""}>+ Team aus Auswahl erstellen</button>
+            </div>
+          </div>`;
+        }
+      }
     }
     if(org){
       const min = isIndividual ? 4 : (t.type==="ko" ? 2 : 3);
@@ -2351,14 +2397,14 @@
       if(d.type==="liga"){
         t.ligaMode = d.ligaMode;
         if(d.ligaMode==="teams"){
-          if(d.teams.length<3) return;
+          if(!inGroup && d.teams.length<3) return;
           t.teams = d.teams;
           t.rueckrunde = !!d.rueckrunde;
           const courtsEl = document.getElementById("courtsInput");
           let courts = 1;
           if(courtsEl){
             const cv = parseInt(courtsEl.value,10);
-            courts = (!isNaN(cv) && cv>0) ? Math.min(cv,20) : Math.max(1, Math.floor(d.teams.length/2));
+            courts = (!isNaN(cv) && cv>0) ? Math.min(cv,20) : Math.max(1, Math.floor((d.teams.length||2)/2));
           }
           t.courts = courts;
         } else {
@@ -2372,11 +2418,12 @@
           t.rounds = d.rounds || 6;
         }
       } else if(d.type==="ko"){
-        if(d.teams.length<2) return;
+        if(!inGroup && d.teams.length<2) return;
         t.teams = d.teams;
       }
 
       if(inGroup){
+        t.groupMemberRoster = d.groupMembers;
         if(t.ligaMode==="individual"){
           t.members = t.players.map(p=>({ userId:p.id, name:p.name, teamId:p.id }));
         } else {
@@ -2476,6 +2523,43 @@
       return render();
     }
 
+    if(action==="addLiveTeam"){
+      const t = state.current;
+      if(t.started || !canFormTeams(t)) return;
+      if(state.teamPickSelection.length!==2) return;
+      const [id1,id2] = state.teamPickSelection;
+      const m1 = (t.groupMemberRoster||[]).find(m=>m.userId===id1);
+      const m2 = (t.groupMemberRoster||[]).find(m=>m.userId===id2);
+      if(!m1 || !m2) return;
+      const nameInput = document.getElementById("groupTeamName");
+      const customName = nameInput ? nameInput.value.trim() : "";
+      const name = customName || `${m1.name} & ${m2.name}`;
+      t.teams.push({ id: uid("t"), name, p1:m1.name, p2:m2.name, memberUserIds:[id1,id2] });
+      [id1,id2].forEach(uidX=>{
+        if(!t.members.find(m=>m.userId===uidX)){
+          t.members.push({ userId:uidX, name:(uidX===id1?m1.name:m2.name), teamId: t.teams[t.teams.length-1].id });
+        } else {
+          t.members.find(m=>m.userId===uidX).teamId = t.teams[t.teams.length-1].id;
+        }
+      });
+      state.teamPickSelection = [];
+      await saveTournament(t);
+      return render();
+    }
+    if(action==="removeLiveTeam"){
+      const t = state.current;
+      if(t.started) return;
+      const teamId = el.dataset.team;
+      const team = t.teams.find(x=>x.id===teamId);
+      if(!team || !canRemoveLiveTeam(t, team)) return;
+      t.teams = t.teams.filter(x=>x.id!==teamId);
+      (team.memberUserIds||[]).forEach(uidX=>{
+        const mem = t.members.find(m=>m.userId===uidX);
+        if(mem) mem.teamId = null;
+      });
+      await saveTournament(t);
+      return render();
+    }
     if(action==="beginTournamentPlay"){
       const t = state.current;
       if(!isOrganizer(t) || t.started) return;
