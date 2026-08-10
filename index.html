@@ -1812,6 +1812,7 @@
     </div>
     <div class="screen" style="padding-top:6px;">
       ${t.finished ? `<div class="champion-banner">🏁 Turnier beendet — Punkte wurden der Gruppe gutgeschrieben</div>` : ""}
+      ${(!org && !mem) ? `<div class="banner-info" style="display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:14px;"><span>Du bist noch nicht beigetreten.</span><button class="btn btn-secondary btn-sm" data-action="joinAsSpectator">Als Zuschauer:in beitreten</button></div>` : ""}
       ${showTabs ? `
       <div class="tabs">
         <div class="tab ${state.tab==='table'?'active':''}" data-action="switchTab" data-tab="table">Tabelle</div>
@@ -2709,6 +2710,14 @@
 
     if(action==="openInvite"){ state.modal="invite"; return render(); }
     if(action==="openMembers"){ state.modal="members"; return render(); }
+    if(action==="joinAsSpectator"){
+      const t = state.current;
+      if(!t || isOrganizer(t) || myMembership(t)) return;
+      t.members.push({ userId: state.identity.id, name: state.identity.name, teamId: null });
+      await saveTournament(t);
+      await addMyCode(t.code);
+      return render();
+    }
     if(action==="togglePromote"){
       const t = state.current;
       if(!isOrganizer(t)) return;
