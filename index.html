@@ -883,6 +883,8 @@
     if(!g.members) g.members = [];
     if(!g.tournamentCodes) g.tournamentCodes = [];
     if(!g.pointsTable) g.pointsTable = {};
+    if(!g.tournamentsPlayedTable) g.tournamentsPlayedTable = {};
+    if(!g.tournamentWinsTable) g.tournamentWinsTable = {};
     return g;
   }
   async function loadGroup(code){
@@ -917,19 +919,43 @@
     return !!(mem && mem.promoted);
   }
 
-  // Platzhalter-Punktevergabe: Teams/Spieler:innen bekommen die gleichen Punkte,
-  // die sie im Turnier selbst erzielt haben, gutgeschrieben auf ihr Gruppenkonto.
-  // Die genaue Formel (Gewichtung nach Turniergröße etc.) klären wir später.
+  // Punkte entsprechen genau dem, was im Turnier selbst erzielt wurde (z. B. 4 Siege = 8 Punkte,
+  // da jeder Sieg in der Turniertabelle 2 Punkte gibt) — keine pauschale Punktzahl.
+  // Bei Team-Turnieren bekommen beide Teammitglieder die vollen Team-Punkte und, falls das Team
+  // das Turnier gewinnt, auch beide den Turniersieg gutgeschrieben.
   function creditGroupPoints(g, t){
     g.pointsTable = g.pointsTable || {};
-    const add = (userId, pts)=>{
+    g.tournamentsPlayedTable = g.tournamentsPlayedTable || {};
+    g.tournamentWinsTable = g.tournamentWinsTable || {};
+    const addPts = (userId, pts)=>{
       if(!userId) return;
       g.pointsTable[userId] = (g.pointsTable[userId]||0) + pts;
     };
+    const addPlayed = (userId)=>{
+      if(!userId) return;
+      g.tournamentsPlayedTable[userId] = (g.tournamentsPlayedTable[userId]||0) + 1;
+    };
+    const addWin = (userId)=>{
+      if(!userId) return;
+      g.tournamentWinsTable[userId] = (g.tournamentWinsTable[userId]||0) + 1;
+    };
+
     if(t.type==="liga" && t.ligaMode==="individual"){
-      computeIndividualStandings(t).forEach(r=> add(r.player.id, r.points));
+      const rows = computeIndividualStandings(t);
+      rows.forEach((r,i)=>{
+        addPts(r.player.id, r.points);
+        addPlayed(r.player.id);
+        if(i===0) addWin(r.player.id);
+      });
     } else if(t.type==="liga" && t.ligaMode==="teams"){
-      computeStandings(t).forEach(r=> (r.team.memberUserIds||[]).forEach(uid=> add(uid, r.points)));
+      const rows = computeStandings(t);
+      rows.forEach((r,i)=>{
+        (r.team.memberUserIds||[]).forEach(uid=>{
+          addPts(uid, r.points);
+          addPlayed(uid);
+          if(i===0) addWin(uid);
+        });
+      });
     } else if(t.type==="ko"){
       t.teams.forEach(team=>{
         let wins = 0;
@@ -938,7 +964,12 @@
           const ev = evaluateMatch(m, t.setTarget);
           if((ev.winnerSide==="A" && m.teamAId===team.id) || (ev.winnerSide==="B" && m.teamBId===team.id)) wins++;
         });
-        (team.memberUserIds||[]).forEach(uid=> add(uid, wins*2));
+        const pts = wins*2;
+        (team.memberUserIds||[]).forEach(uid=>{
+          addPts(uid, pts);
+          addPlayed(uid);
+          if(t.champion===team.id) addWin(uid);
+        });
       });
     }
   }
@@ -1492,15 +1523,23 @@
   }
 
   function groupPointsTable(g){
-    const rows = g.members.map(mem=>({ mem, points: (g.pointsTable && g.pointsTable[mem.userId]) || 0 }))
-      .sort((a,b)=> b.points-a.points);
+    const rows = g.members.map(mem=>{
+      const points = (g.pointsTable && g.pointsTable[mem.userId]) || 0;
+      const played = (g.tournamentsPlayedTable && g.tournamentsPlayedTable[mem.userId]) || 0;
+      const wins = (g.tournamentWinsTable && g.tournamentWinsTable[mem.userId]) || 0;
+      const ratio = played>0 ? wins/played : 0;
+      return { mem, points, played, wins, ratio };
+    }).sort((a,b)=> b.ratio-a.ratio || b.points-a.points);
     return `
     <table class="standings">
-      <thead><tr><th class="left">Mitglied</th><th>Punkte</th></tr></thead>
+      <thead><tr><th class="left">Mitglied</th><th>Turniere</th><th>Siege</th><th>Quote</th><th>Punkte</th></tr></thead>
       <tbody>
         ${rows.map((r,i)=>`
           <tr>
             <td class="left"><span class="rank">${i+1}</span>&nbsp; ${esc(r.mem.name)}${r.mem.userId===g.leaderId?" 👑":""}</td>
+            <td>${r.played}</td>
+            <td>${r.wins}</td>
+            <td class="mono">${r.played>0 ? Math.round(r.ratio*100)+"%" : "–"}</td>
             <td class="pts">${r.points}</td>
           </tr>`).join("")}
       </tbody>
@@ -2443,6 +2482,8 @@
       const idx = g.members.findIndex(m=>m.userId===userId);
       if(idx>=0) g.members.splice(idx,1);
       if(g.pointsTable) delete g.pointsTable[userId];
+      if(g.tournamentsPlayedTable) delete g.tournamentsPlayedTable[userId];
+      if(g.tournamentWinsTable) delete g.tournamentWinsTable[userId];
       await saveGroup(g);
       return render();
     }
@@ -2456,6 +2497,8 @@
         const idx = g.members.findIndex(m=>m.userId===state.identity.id);
         if(idx>=0) g.members.splice(idx,1);
         if(g.pointsTable) delete g.pointsTable[state.identity.id];
+        if(g.tournamentsPlayedTable) delete g.tournamentsPlayedTable[state.identity.id];
+        if(g.tournamentWinsTable) delete g.tournamentWinsTable[state.identity.id];
         await saveGroup(g);
       }
       await removeMyGroupCode(g.code);
