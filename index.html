@@ -1404,7 +1404,7 @@
           <div class="banner-info">Niemand wird automatisch eingetragen. Mitglieder treten dem Turnier selbst als Spieler:in bei, sobald es angelegt ist — mindestens 4 werden zum Starten benötigt. Gruppe hat aktuell ${members.length} Mitglieder.${members.length<4?' Das reicht noch nicht für Ohne-feste-Teams-Liga.':''}</div>
           ${rows}
           ${state.createError ? `<div class="banner-error">${esc(state.createError)}</div>` : ""}
-          <button class="btn btn-primary" data-action="startTournament" ${members.length<4?"disabled":""}>Turnier anlegen</button>
+          <button class="btn btn-primary" data-action="startTournament">Turnier anlegen</button>
         </div>
       </div>`;
     }
@@ -2718,7 +2718,7 @@
           t.courts = courts;
         } else {
           if(inGroup){
-            if(!d.groupMembers || d.groupMembers.length<4) return;
+            if(!d.groupMembers) return;
             t.players = []; // Mitglieder treten selbst bei, siehe "Wird gebildet"-Ansicht
           } else {
             if(d.players.length<4) return;
