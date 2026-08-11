@@ -1603,7 +1603,7 @@
       <tbody>
         ${rows.map((r,i)=>`
           <tr>
-            <td class="left"><span class="rank">${i+1}</span>&nbsp; ${esc(r.mem.name)}${r.mem.userId===g.leaderId?" 👑":""}</td>
+            <td class="left"><span class="rank">${i+1}</span>&nbsp; ${esc(r.mem.name)}${r.mem.userId===g.leaderId?" (Gruppenleiter)":(r.mem.promoted?" (Co-Gruppenleiter)":"")}</td>
             <td>${r.played}</td>
             <td>${r.wins}</td>
             <td class="mono">${r.played>0 ? Math.round(r.ratio*100)+"%" : "–"}</td>
@@ -2117,7 +2117,7 @@
       <div class="team-row" style="align-items:center;">
         <div class="team-avatar">${esc((mem.name[0]||"?").toUpperCase())}</div>
         <div class="t-info">
-          <div class="t-name">${esc(mem.name)}${isLeader?" 👑":""}</div>
+          <div class="t-name">${esc(mem.name)}${isLeader?" (Gruppenleiter)":(mem.promoted?" (Co-Gruppenleiter)":"")}</div>
           <div class="t-players">${esc(roleBadge)} · ${pts} Pkt.</div>
         </div>
       </div>
