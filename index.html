@@ -1304,11 +1304,11 @@
       return `
       <div class="topbar">
         <div class="back-btn" data-action="backToStep1">←</div>
-        <div><h1>Spieler:innen</h1><div class="sub">Schritt 2 von 2 · alle Gruppenmitglieder</div></div>
+        <div><h1>Spieler:innen</h1><div class="sub">Schritt 2 von 2 · Beitritt folgt im Turnier</div></div>
       </div>
       <div class="screen" style="padding-top:6px;">
         <div class="stack">
-          <div class="banner-info">Alle ${members.length} Gruppenmitglieder nehmen automatisch teil.${members.length<4?' Mindestens 4 werden für Ohne-feste-Teams-Liga benötigt.':''}</div>
+          <div class="banner-info">Niemand wird automatisch eingetragen. Mitglieder treten dem Turnier selbst als Spieler:in bei, sobald es angelegt ist — mindestens 4 werden zum Starten benötigt. Gruppe hat aktuell ${members.length} Mitglieder.${members.length<4?' Das reicht noch nicht für Ohne-feste-Teams-Liga.':''}</div>
           ${rows}
           ${state.createError ? `<div class="banner-error">${esc(state.createError)}</div>` : ""}
           <button class="btn btn-primary" data-action="startTournament" ${members.length<4?"disabled":""}>Turnier anlegen</button>
@@ -1740,9 +1740,28 @@
     const isIndividual = t.type==="liga" && t.ligaMode==="individual";
     let html = `<div class="banner-info" style="margin-bottom:14px;">Das Turnier wird gerade vorbereitet. Sobald ${org ? "du auf \"Turnier starten\" tippst" : "der Turnierleiter startet"}, wird der Spielplan erstellt.</div>`;
     if(isIndividual){
-      html += `<div class="section-title">Teilnehmer:innen</div>`;
-      html += t.players.map((p,i)=>`
-        <div class="team-row"><div class="team-avatar">${i+1}</div><div class="t-info"><div class="t-name">${esc(p.name)}</div></div></div>`).join("");
+      html += `<div class="section-title">Spieler:innen (${t.players.length}${t.players.length<4?' · mind. 4 nötig':''})</div>`;
+      html += t.players.length ? t.players.map((p,i)=>{
+        const removable = isOrganizer(t) || p.id===state.identity.id;
+        return `
+        <div class="team-row">
+          <div class="team-avatar">${i+1}</div>
+          <div class="t-info"><div class="t-name">${esc(p.name)}</div></div>
+          ${removable ? `<button class="icon-btn" data-action="removeLivePlayer" data-player="${esc(p.id)}" title="Entfernen">✕</button>` : ""}
+        </div>`;
+      }).join("") : `<div class="empty">Noch niemand beigetreten.</div>`;
+
+      if(canFormTeams(t)){
+        const joinedIds = new Set(t.players.map(p=>p.id));
+        const available = (t.groupMemberRoster||[]).filter(m=>!joinedIds.has(m.userId));
+        html += `<div class="section-title">Als Spieler:in beitreten</div>`;
+        html += available.length ? available.map(m=>`
+          <div class="team-row">
+            <div class="team-avatar">${esc((m.name[0]||"?").toUpperCase())}</div>
+            <div class="t-info"><div class="t-name">${esc(m.name)}</div></div>
+            <button class="btn btn-secondary btn-sm" data-action="addLivePlayer" data-user="${esc(m.userId)}">Hinzufügen</button>
+          </div>`).join("") : `<div class="empty">Alle Gruppenmitglieder sind schon beigetreten.</div>`;
+      }
     } else {
       const min = t.type==="ko" ? 2 : 3;
       html += `<div class="section-title">Teams (${t.teams.length}${t.teams.length<min?` · mind. ${min} nötig`:''})</div>`;
@@ -2564,7 +2583,7 @@
         } else {
           if(inGroup){
             if(!d.groupMembers || d.groupMembers.length<4) return;
-            t.players = d.groupMembers.map(m=>({ id:m.userId, name:m.name }));
+            t.players = []; // Mitglieder treten selbst bei, siehe "Wird gebildet"-Ansicht
           } else {
             if(d.players.length<4) return;
             t.players = d.players;
@@ -2648,6 +2667,30 @@
             }
           }
         }
+      } else {
+        const t = (state.current && state.current.code===code) ? state.current : await loadTournament(code);
+        if(t){
+          const mem = t.members.find(m=>m.userId===state.identity.id);
+          if(mem){
+            if(!t.started && mem.teamId){
+              const isIndividual = t.type==="liga" && t.ligaMode==="individual";
+              if(isIndividual){
+                t.players = t.players.filter(p=>p.id!==mem.teamId);
+              } else {
+                const team = t.teams.find(x=>x.id===mem.teamId);
+                if(team){
+                  t.teams = t.teams.filter(x=>x.id!==team.id);
+                  (team.memberUserIds||[]).forEach(uidX=>{
+                    const m2 = t.members.find(mm=>mm.userId===uidX);
+                    if(m2) m2.teamId = null;
+                  });
+                }
+              }
+            }
+            t.members = t.members.filter(m=>m.userId!==state.identity.id);
+            await saveTournament(t);
+          }
+        }
       }
       await removeMyCode(code);
       if(state.currentCode===code){
@@ -2723,6 +2766,31 @@
         const mem = t.members.find(m=>m.userId===uidX);
         if(mem) mem.teamId = null;
       });
+      await saveTournament(t);
+      return render();
+    }
+    if(action==="addLivePlayer"){
+      const t = state.current;
+      if(t.started || !canFormTeams(t)) return;
+      const uidP = el.dataset.user;
+      if(t.players.find(p=>p.id===uidP)) return;
+      const gm = (t.groupMemberRoster||[]).find(m=>m.userId===uidP);
+      if(!gm) return;
+      t.players.push({ id: uidP, name: gm.name });
+      const existingMem = t.members.find(m=>m.userId===uidP);
+      if(existingMem) existingMem.teamId = uidP;
+      else t.members.push({ userId: uidP, name: gm.name, teamId: uidP });
+      await saveTournament(t);
+      return render();
+    }
+    if(action==="removeLivePlayer"){
+      const t = state.current;
+      if(t.started) return;
+      const pid = el.dataset.player;
+      if(!isOrganizer(t) && pid!==state.identity.id) return;
+      t.players = t.players.filter(p=>p.id!==pid);
+      const mem = t.members.find(m=>m.userId===pid);
+      if(mem) mem.teamId = null;
       await saveTournament(t);
       return render();
     }
