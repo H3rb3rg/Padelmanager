@@ -544,6 +544,18 @@
   }
 
   // ---------- Domain logic: Liga (ohne feste Teams / Americano-Rotation) ----------
+  // Grobe Orientierung, wie viele Runden bei gegebener Teilnehmerzahl ohne exakte
+  // Wiederholung derselben Begegnung möglich sind (bei sehr wenigen Teilnehmenden,
+  // besonders genau 4, ist die Anzahl mathematisch stark begrenzt).
+  function estimateMaxRepeatFreeRounds(n){
+    if(n<4) return 0;
+    const matchesPerRound = Math.floor(n/4);
+    if(matchesPerRound===0) return 0;
+    const choose4 = (n*(n-1)*(n-2)*(n-3))/24; // C(n,4)
+    const distinctMatches = choose4*3; // 3 mögliche 2-gegen-2-Aufteilungen je 4er-Gruppe
+    return Math.max(1, Math.floor(distinctMatches/matchesPerRound));
+  }
+
   function buildAmericanoCounts(players, existingRounds){
     const ids = players.map(p=>p.id);
     const partnerCount = {}, opponentCount = {}, sitOutCount = {};
@@ -1389,6 +1401,11 @@
             </div>
           </div>
           ${state.createError ? `<div class="banner-error">${esc(state.createError)}</div>` : ""}
+          ${d.players.length>=4 ? (()=>{
+            const maxSafe = estimateMaxRepeatFreeRounds(d.players.length);
+            const over = d.rounds > maxSafe;
+            return `<div class="${over?'banner-error':'banner-info'}">Bei ${d.players.length} Teilnehmenden sind ca. ${maxSafe} Runden ohne Wiederholung derselben Begegnung möglich. ${over ? `Ihr habt ${d.rounds} Runden eingestellt — einige Begegnungen werden sich also zwangsläufig wiederholen.` : ''}</div>`;
+          })() : ""}
           <div class="banner-info">Sobald die Runden erstellt sind, können keine Spieler:innen mehr ergänzt werden.</div>
           <button class="btn btn-primary" data-action="startTournament" ${d.players.length<4?"disabled":""}>Runden auslosen &amp; Turnier starten</button>
         </div>
@@ -1753,7 +1770,12 @@
     });
     if(!any) html += `<div class="empty">Keine eigenen Spiele.</div>`;
     if(!mine && !t.rueckrunde && isOrganizer(t)){
-      html += `<button class="btn btn-secondary" style="margin-top:18px;" data-action="startRueckrunde">Rückrunde starten (weitere Runden auslosen)</button>`;
+      const totalAfter = t.ligaRounds.length + (t.rounds||6);
+      const maxSafe = estimateMaxRepeatFreeRounds(t.players.length);
+      if(totalAfter>maxSafe){
+        html += `<div class="banner-error" style="margin-top:18px;">Nach der Rückrunde wären es ${totalAfter} Runden insgesamt — bei ${t.players.length} Spieler:innen sind aber nur ca. ${maxSafe} ohne Wiederholung möglich. Einige Begegnungen werden sich dann wiederholen.</div>`;
+      }
+      html += `<button class="btn btn-secondary" style="margin-top:10px;" data-action="startRueckrunde">Rückrunde starten (weitere Runden auslosen)</button>`;
     }
     return html;
   }
@@ -1798,6 +1820,11 @@
     let html = `<div class="banner-info" style="margin-bottom:14px;">Das Turnier wird gerade vorbereitet. Sobald ${org ? "du auf \"Turnier starten\" tippst" : "der Turnierleiter startet"}, wird der Spielplan erstellt.</div>`;
     if(isIndividual){
       html += `<div class="section-title">Spieler:innen (${t.players.length}${t.players.length<4?' · mind. 4 nötig':''})</div>`;
+      if(t.players.length>=4){
+        const maxSafe = estimateMaxRepeatFreeRounds(t.players.length);
+        const over = (t.rounds||6) > maxSafe;
+        html += `<div class="${over?'banner-error':'banner-info'}" style="margin-bottom:10px;">Bei ${t.players.length} Spieler:innen sind ca. ${maxSafe} Runden ohne Wiederholung derselben Begegnung möglich (eingestellt: ${t.rounds||6}).${over?' Einige Begegnungen werden sich also zwangsläufig wiederholen.':''}</div>`;
+      }
       html += t.players.length ? t.players.map((p,i)=>{
         const removable = isOrganizer(t) || p.id===state.identity.id;
         return `
