@@ -766,6 +766,21 @@
     const p = (t.players||[]).find(x=>x.id===id);
     return p ? p.name : "?";
   }
+  function tournamentWinnerName(t){
+    if(!t.finished) return null;
+    if(t.type==="ko"){
+      return t.champion ? teamName(t, t.champion) : null;
+    }
+    if(t.type==="liga" && t.ligaMode==="individual"){
+      const rows = computeIndividualStandings(t);
+      return rows.length ? rows[0].player.name : null;
+    }
+    if(t.type==="liga" && t.ligaMode==="teams"){
+      const rows = computeStandings(t);
+      return rows.length ? rows[0].team.name : null;
+    }
+    return null;
+  }
   function sideLabel(t, match, side){
     if(match.pairA){
       const ids = side==="A" ? match.pairA : match.pairB;
@@ -1217,6 +1232,7 @@
       const role = isOrganizer(t) ? "Turnierleiter" : (mem && mem.teamId ? "Spieler" : "Zuschauer");
       const countLabel = (t.type==="liga" && t.ligaMode==="individual") ? `${t.players.length} Spieler:innen` : `${t.teams.length} Teams`;
       const typeLabel = t.type==="ko" ? "K.-o.-System" : (t.ligaMode==="individual" ? "Liga · ohne feste Teams" : "Liga");
+      const winner = t.finished ? tournamentWinnerName(t) : null;
       return `
       <div class="tourn-card" data-action="openDetail" data-code="${esc(t.code)}">
         <button class="icon-btn delete-icon" data-action="deleteTournament" data-code="${esc(t.code)}" onclick="event.stopPropagation()">🗑</button>
@@ -1225,6 +1241,7 @@
           <span class="pill">${esc(typeLabel)}</span>
           <span class="pill muted">${esc(countLabel)}</span>
           <span class="pill muted">${esc(role)}</span>
+          ${winner ? `<span class="pill">🏆 ${esc(winner)}</span>` : ""}
         </div>
       </div>`;
     }).join("");
@@ -1591,6 +1608,7 @@
       const countLabel = (t.type==="liga" && t.ligaMode==="individual") ? `${t.players.length} Spieler:innen` : `${t.teams.length} Teams`;
       const typeLabel = t.type==="ko" ? "K.-o.-System" : (t.ligaMode==="individual" ? "Liga · ohne feste Teams" : "Liga");
       const statusLabel = t.finished ? "Beendet" : (t.started ? "Läuft" : "Wird gebildet");
+      const winner = t.finished ? tournamentWinnerName(t) : null;
       return `
       <div class="tourn-card" data-action="openDetail" data-code="${esc(t.code)}" style="border-left-color:var(--pcourt);">
         <div class="name">${esc(t.name)}</div>
@@ -1598,6 +1616,7 @@
           <span class="pill">${esc(typeLabel)}</span>
           <span class="pill muted">${esc(countLabel)}</span>
           <span class="pill muted">${esc(statusLabel)}</span>
+          ${winner ? `<span class="pill">🏆 ${esc(winner)}</span>` : ""}
         </div>
       </div>`;
     }).join("")}</div>` : `<div class="empty">Noch keine Turniere in dieser Gruppe.</div>`;
