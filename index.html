@@ -1011,7 +1011,7 @@
     state.pollHandle = setInterval(async ()=>{
       if(state.view==="detail" && state.currentCode){
         const code = state.currentCode;
-        const fresh = await loadTournament(code);
+        let fresh = await loadTournament(code);
         if(!fresh){
           if(state.currentCode===code){
             state.homeNotice = `Das Turnier „${state.current ? state.current.name : ""}" ist nicht mehr verfügbar (wahrscheinlich gelöscht).`;
@@ -1020,6 +1020,7 @@
           }
           return;
         }
+        fresh = await syncGroupRosterIfNeeded(fresh);
         if(JSON.stringify(fresh)!==JSON.stringify(state.current)){
           state.current = fresh;
           if(!state.modal){
@@ -1107,9 +1108,24 @@
     render();
   }
 
+  // Solange ein Gruppen-Turnier noch nicht gestartet ist, sollen auch Mitglieder,
+  // die der Gruppe erst später beigetreten sind, noch Teams bilden/beitreten können.
+  // Dafür wird der beim Anlegen gespeicherte Mitglieder-Schnappschuss bis zum Start
+  // laufend mit der echten Gruppen-Mitgliederliste abgeglichen.
+  async function syncGroupRosterIfNeeded(t){
+    if(!t || !t.groupCode || t.started) return t;
+    const g = await loadGroup(t.groupCode);
+    if(g && JSON.stringify(g.members)!==JSON.stringify(t.groupMemberRoster)){
+      t.groupMemberRoster = g.members;
+      await saveTournament(t);
+    }
+    return t;
+  }
+
   async function openDetail(code){
-    const t = await loadTournament(code);
+    let t = await loadTournament(code);
     if(!t){ return goHome(); }
+    t = await syncGroupRosterIfNeeded(t);
     state.current = t; state.currentCode = code; state.view = "detail"; state.tab = "table"; state.modal=null;
     state.teamPickSelection = [];
     startPolling();
