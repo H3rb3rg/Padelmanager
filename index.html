@@ -2414,8 +2414,10 @@
     if(action==="removeGroupMember"){
       const g = state.currentGroup;
       if(!isGroupLeader(g)) return;
-      const idx = g.members.findIndex(m=>m.userId===el.dataset.user);
+      const userId = el.dataset.user;
+      const idx = g.members.findIndex(m=>m.userId===userId);
       if(idx>=0) g.members.splice(idx,1);
+      if(g.pointsTable) delete g.pointsTable[userId];
       await saveGroup(g);
       return render();
     }
@@ -2423,7 +2425,14 @@
     if(action==="confirmDeleteGroup"){
       const g = state.currentGroup;
       const leader = isGroupLeader(g);
-      if(leader) await sDelete("group:"+g.code, true);
+      if(leader){
+        await sDelete("group:"+g.code, true);
+      } else {
+        const idx = g.members.findIndex(m=>m.userId===state.identity.id);
+        if(idx>=0) g.members.splice(idx,1);
+        if(g.pointsTable) delete g.pointsTable[state.identity.id];
+        await saveGroup(g);
+      }
       await removeMyGroupCode(g.code);
       state.modal=null; state.modalData={};
       return goHome();
