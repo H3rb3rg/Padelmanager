@@ -1755,12 +1755,16 @@
         const joinedIds = new Set(t.players.map(p=>p.id));
         const available = (t.groupMemberRoster||[]).filter(m=>!joinedIds.has(m.userId));
         html += `<div class="section-title">Als Spieler:in beitreten</div>`;
-        html += available.length ? available.map(m=>`
+        if(!org) html += `<div class="banner-info" style="margin-bottom:10px;">Du kannst nur dich selbst hinzufügen — für andere kann das der Turnierleiter erledigen.</div>`;
+        html += available.length ? available.map(m=>{
+          const canAdd = org || m.userId===state.identity.id;
+          return `
           <div class="team-row">
             <div class="team-avatar">${esc((m.name[0]||"?").toUpperCase())}</div>
             <div class="t-info"><div class="t-name">${esc(m.name)}</div></div>
-            <button class="btn btn-secondary btn-sm" data-action="addLivePlayer" data-user="${esc(m.userId)}">Hinzufügen</button>
-          </div>`).join("") : `<div class="empty">Alle Gruppenmitglieder sind schon beigetreten.</div>`;
+            ${canAdd ? `<button class="btn btn-secondary btn-sm" data-action="addLivePlayer" data-user="${esc(m.userId)}">Hinzufügen</button>` : ""}
+          </div>`;
+        }).join("") : `<div class="empty">Alle Gruppenmitglieder sind schon beigetreten.</div>`;
       }
     } else {
       const min = t.type==="ko" ? 2 : 3;
@@ -1790,8 +1794,10 @@
         }).join("");
 
         html += `<div class="section-title">Team bilden</div>`;
+        if(!org) html += `<div class="banner-info" style="margin-bottom:10px;">Du kannst nur ein Team bilden, in dem du selbst mitspielst — beliebige Zweier-Teams kann nur der Turnierleiter zusammenstellen.</div>`;
         html += available.length ? pickRows : `<div class="empty">Alle Gruppenmitglieder sind schon einem Team zugeordnet.</div>`;
         if(available.length){
+          const selectionValid = state.teamPickSelection.length===2 && (org || state.teamPickSelection.includes(state.identity.id));
           html += `
           <div class="card">
             <div class="stack">
@@ -1799,7 +1805,7 @@
                 <label>Teamname (optional)</label>
                 <input class="input" id="groupTeamName" placeholder="Vorname & Vorname">
               </div>
-              <button class="btn btn-secondary" data-action="addLiveTeam" ${state.teamPickSelection.length!==2?"disabled":""}>+ Team aus Auswahl erstellen</button>
+              <button class="btn btn-secondary" data-action="addLiveTeam" ${selectionValid?"":"disabled"}>+ Team aus Auswahl erstellen</button>
             </div>
           </div>`;
         }
@@ -2736,6 +2742,7 @@
       const t = state.current;
       if(t.started || !canFormTeams(t)) return;
       if(state.teamPickSelection.length!==2) return;
+      if(!isOrganizer(t) && !state.teamPickSelection.includes(state.identity.id)) return;
       const [id1,id2] = state.teamPickSelection;
       const m1 = (t.groupMemberRoster||[]).find(m=>m.userId===id1);
       const m2 = (t.groupMemberRoster||[]).find(m=>m.userId===id2);
@@ -2773,6 +2780,7 @@
       const t = state.current;
       if(t.started || !canFormTeams(t)) return;
       const uidP = el.dataset.user;
+      if(!isOrganizer(t) && uidP!==state.identity.id) return;
       if(t.players.find(p=>p.id===uidP)) return;
       const gm = (t.groupMemberRoster||[]).find(m=>m.userId===uidP);
       if(!gm) return;
