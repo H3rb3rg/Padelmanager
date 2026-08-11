@@ -885,6 +885,7 @@
     if(!g.pointsTable) g.pointsTable = {};
     if(!g.tournamentsPlayedTable) g.tournamentsPlayedTable = {};
     if(!g.tournamentWinsTable) g.tournamentWinsTable = {};
+    if(g.statsRecalculated===undefined) g.statsRecalculated = false;
     return g;
   }
   async function loadGroup(code){
@@ -1037,6 +1038,14 @@
     render();
   }
 
+  function recomputeGroupStats(g, tournaments){
+    g.pointsTable = {};
+    g.tournamentsPlayedTable = {};
+    g.tournamentWinsTable = {};
+    tournaments.forEach(t=>{ if(t.finished) creditGroupPoints(g, t); });
+    g.statsRecalculated = true;
+  }
+
   async function refreshGroupTournaments(g){
     const results = [];
     let staleFound = false;
@@ -1048,10 +1057,18 @@
     }
     results.sort((a,b)=> (b.updatedAt||0) - (a.updatedAt||0));
     state.currentGroupTournaments = results;
+    let needsSave = false;
     if(staleFound){
       g.tournamentCodes = validCodes;
-      await saveGroup(g);
+      needsSave = true;
     }
+    if(!g.statsRecalculated){
+      // Einmalige Nachberechnung: bereits vor dieser Funktion beendete Turniere fehlten
+      // bisher in der Ewigkeitstabelle, weil sie schon als "pointsAwarded" markiert waren.
+      recomputeGroupStats(g, results);
+      needsSave = true;
+    }
+    if(needsSave) await saveGroup(g);
   }
 
   async function openGroupDetail(code){
@@ -1581,6 +1598,7 @@
       <div class="section-title">Gesamttabelle</div>
       <div class="banner-info" style="margin-bottom:14px;">Punkte aus allen beendeten Turnieren dieser Gruppe. Die genaue Gewichtung feilen wir später noch aus.</div>
       ${groupPointsTable(g)}
+      ${admin ? `<button class="btn btn-ghost btn-sm" style="margin-top:10px;" data-action="recalcGroupStats">🔄 Tabelle neu berechnen</button>` : ""}
 
       <div class="section-title">Turniere in dieser Gruppe</div>
       ${tournCards}
@@ -2506,6 +2524,13 @@
       return goHome();
     }
 
+    if(action==="recalcGroupStats"){
+      const g = state.currentGroup;
+      if(!isGroupAdmin(g)) return;
+      recomputeGroupStats(g, state.currentGroupTournaments||[]);
+      await saveGroup(g);
+      return render();
+    }
     if(action==="goCreateInGroup"){
       const g = state.currentGroup;
       if(!isGroupAdmin(g)) return;
