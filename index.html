@@ -1730,7 +1730,7 @@
       <tbody>
         ${standings.map((r,i)=>`
           <tr>
-            <td class="left" data-action="openTeamMatches" data-team="${esc(r.team.id)}" style="cursor:pointer;"><span class="rank">${i+1}</span>&nbsp; ${esc(r.team.name)}</td>
+            <td class="left" data-action="openTeamMatches" data-team="${esc(r.team.id)}" style="cursor:pointer;"><span class="rank">${i+1}</span>&nbsp; ${esc(r.team.name)}${(t.finished && i===0) ? " 👑" : ""}</td>
             <td>${r.played}</td>
             <td>${r.wins}</td>
             <td>${r.losses}</td>
@@ -1787,7 +1787,7 @@
       <tbody>
         ${rows.map((r,i)=>`
           <tr>
-            <td class="left"><span class="rank">${i+1}</span>&nbsp; ${esc(r.player.name)}</td>
+            <td class="left"><span class="rank">${i+1}</span>&nbsp; ${esc(r.player.name)}${(t.finished && i===0) ? " 👑" : ""}</td>
             <td>${r.played}</td>
             <td>${r.wins}</td>
             <td>${r.losses}</td>
