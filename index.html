@@ -2362,6 +2362,7 @@
   function modalJoinTeam(){
     const t = state.modalData.tournament;
     const isIndividual = t.type==="liga" && t.ligaMode==="individual";
+    const forOrganizer = isOrganizer(t);
     const entities = entityList(t).map(en=>`
       <div class="radio-team" data-action="chooseTeam" data-team="${en.id}">
         <div class="team-avatar">${esc((en.name[0]||"?").toUpperCase())}</div>
@@ -2371,12 +2372,14 @@
     <div class="modal-overlay" data-action="closeModalBg">
       <div class="modal" onclick="event.stopPropagation()">
         <div class="modal-handle"></div>
-        <h2>Willkommen bei ${esc(t.name)}</h2>
-        <div class="modal-sub">${isIndividual ? "Wer bist du? So kannst du deine eigenen Ergebnisse eintragen." : "Zu welchem Team gehörst du? Als Teammitglied kannst du eure Ergebnisse eintragen."}</div>
+        <h2>${forOrganizer ? "Spielst du selbst mit?" : `Willkommen bei ${esc(t.name)}`}</h2>
+        <div class="modal-sub">${forOrganizer
+          ? (isIndividual ? "Wähle dich selbst aus der Liste, falls du auch mitspielst — sonst einfach \"Nur zuschauen/leiten\"." : "Wähle dein eigenes Team aus, falls du auch mitspielst — sonst einfach \"Nur zuschauen/leiten\". Änderbar über die Mitgliederliste.")
+          : (isIndividual ? "Wer bist du? So kannst du deine eigenen Ergebnisse eintragen." : "Zu welchem Team gehörst du? Als Teammitglied kannst du eure Ergebnisse eintragen.")}</div>
         ${entities}
         <div class="radio-team" data-action="chooseTeam" data-team="">
           <div class="team-avatar">👁</div>
-          <div class="t-info"><div class="t-name">Nur zuschauen</div><div class="t-players">Kein Anspruch, nur Tabelle ansehen</div></div>
+          <div class="t-info"><div class="t-name">${forOrganizer ? "Nur zuschauen/leiten" : "Nur zuschauen"}</div><div class="t-players">Kein Anspruch, nur Tabelle ansehen</div></div>
         </div>
       </div>
     </div>`;
@@ -2799,6 +2802,14 @@
       await saveTournament(t);
       await addMyCode(code);
       state.draft = null;
+      const entities = entityList(t);
+      if(entities.length){
+        state.current = t; state.currentCode = code; state.view = "detail"; state.tab = "table";
+        state.modal = "jointeam";
+        state.modalData = { tournament: t };
+        startPolling();
+        return render();
+      }
       return openDetail(code);
     }
 
