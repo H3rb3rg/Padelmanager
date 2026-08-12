@@ -649,22 +649,28 @@
 
   function computeIndividualStandings(t){
     const rows = {};
-    t.players.forEach(p=>{ rows[p.id] = { player:p, played:0, wins:0, points:0 }; });
+    t.players.forEach(p=>{ rows[p.id] = { player:p, played:0, wins:0, losses:0, gamesW:0, gamesL:0, points:0 }; });
     (t.ligaRounds||[]).forEach(rd=>{
       rd.matches.forEach(m=>{
         const ev = evaluateMatch(m, t.setTarget);
-        m.pairA.forEach(pid=>{ if(rows[pid]) rows[pid].played++; });
-        m.pairB.forEach(pid=>{ if(rows[pid]) rows[pid].played++; });
+        if(!ev.completed) return;
         const s = m.sets[0];
-        if(s && setWinner(s.a, s.b, t.setTarget)){
-          m.pairA.forEach(pid=>{ if(rows[pid]) rows[pid].points += s.a; });
-          m.pairB.forEach(pid=>{ if(rows[pid]) rows[pid].points += s.b; });
+        m.pairA.forEach(pid=>{ if(rows[pid]){ rows[pid].played++; rows[pid].gamesW += s.a; rows[pid].gamesL += s.b; } });
+        m.pairB.forEach(pid=>{ if(rows[pid]){ rows[pid].played++; rows[pid].gamesW += s.b; rows[pid].gamesL += s.a; } });
+        if(ev.winnerSide==="A"){
+          m.pairA.forEach(pid=>{ if(rows[pid]){ rows[pid].wins++; rows[pid].points+=2; } });
+          m.pairB.forEach(pid=>{ if(rows[pid]) rows[pid].losses++; });
+        } else if(ev.winnerSide==="B"){
+          m.pairB.forEach(pid=>{ if(rows[pid]){ rows[pid].wins++; rows[pid].points+=2; } });
+          m.pairA.forEach(pid=>{ if(rows[pid]) rows[pid].losses++; });
         }
-        if(ev.winnerSide==="A") m.pairA.forEach(pid=>{ if(rows[pid]) rows[pid].wins++; });
-        else if(ev.winnerSide==="B") m.pairB.forEach(pid=>{ if(rows[pid]) rows[pid].wins++; });
       });
     });
-    return Object.values(rows).sort((x,y)=> y.points-x.points || y.wins-x.wins);
+    return Object.values(rows).sort((x,y)=>{
+      if(y.points!==x.points) return y.points-x.points;
+      const xg = x.gamesW-x.gamesL, yg = y.gamesW-y.gamesL;
+      return yg-xg;
+    });
   }
 
   // ---------- Domain logic: K.-o.-System ----------
@@ -912,7 +918,7 @@
     if(!g.pointsTable) g.pointsTable = {};
     if(!g.tournamentsPlayedTable) g.tournamentsPlayedTable = {};
     if(!g.tournamentWinsTable) g.tournamentWinsTable = {};
-    if(g.statsRecalculated===undefined) g.statsRecalculated = false;
+    if(g.statsVersion===undefined) g.statsVersion = 0;
     return g;
   }
   async function loadGroup(code){
@@ -1066,12 +1072,18 @@
     render();
   }
 
+  // Erhöhen, wann immer sich die Punkte-/Sieg-Formel ändert — sorgt dafür, dass
+  // bereits bestehende Gruppen ihre Ewigkeitstabelle beim nächsten Öffnen automatisch
+  // einmalig aus allen beendeten Turnieren neu berechnen (z. B. nach Anpassung des
+  // Punktesystems für "ohne feste Teams").
+  const GROUP_STATS_VERSION = 2;
+
   function recomputeGroupStats(g, tournaments){
     g.pointsTable = {};
     g.tournamentsPlayedTable = {};
     g.tournamentWinsTable = {};
     tournaments.forEach(t=>{ if(t.finished) creditGroupPoints(g, t); });
-    g.statsRecalculated = true;
+    g.statsVersion = GROUP_STATS_VERSION;
   }
 
   async function refreshGroupTournaments(g){
@@ -1090,9 +1102,8 @@
       g.tournamentCodes = validCodes;
       needsSave = true;
     }
-    if(!g.statsRecalculated){
-      // Einmalige Nachberechnung: bereits vor dieser Funktion beendete Turniere fehlten
-      // bisher in der Ewigkeitstabelle, weil sie schon als "pointsAwarded" markiert waren.
+    if(g.statsVersion !== GROUP_STATS_VERSION){
+      // Nachberechnung: entweder erstmalig, oder weil sich die Punkteformel seitdem geändert hat.
       recomputeGroupStats(g, results);
       needsSave = true;
     }
@@ -1772,13 +1783,15 @@
     const rows = computeIndividualStandings(t);
     return `
     <table class="standings">
-      <thead><tr><th class="left">Spieler:in</th><th>Runden</th><th>Siege</th><th>Pkt</th></tr></thead>
+      <thead><tr><th class="left">Spieler:in</th><th>Sp</th><th>S</th><th>N</th><th>Spiele</th><th>Pkt</th></tr></thead>
       <tbody>
         ${rows.map((r,i)=>`
           <tr>
             <td class="left"><span class="rank">${i+1}</span>&nbsp; ${esc(r.player.name)}</td>
             <td>${r.played}</td>
             <td>${r.wins}</td>
+            <td>${r.losses}</td>
+            <td class="mono">${r.gamesW}:${r.gamesL}</td>
             <td class="pts">${r.points}</td>
           </tr>`).join("")}
       </tbody>
