@@ -556,6 +556,20 @@
     return Math.max(1, Math.floor(distinctMatches/matchesPerRound));
   }
 
+  // Empfohlene Rundenzahl, damit möglichst jede Zweier-Partnerschaft mindestens einmal
+  // vorkommt. Rechnerisches Minimum plus Sicherheitspuffer, weil die Verlosung ein
+  // bestmöglicher, aber nicht perfekt garantierter Algorithmus ist — bei sehr vielen
+  // Teilnehmenden kann in Einzelfällen trotzdem eine Partnerschaft übrig bleiben.
+  function optimalRoundsForPlayers(n){
+    if(n<4) return 0;
+    const slotsPerRound = 2*Math.floor(n/4);
+    if(slotsPerRound===0) return 0;
+    const neededPartnerships = (n*(n-1))/2;
+    const base = Math.ceil(neededPartnerships/slotsPerRound);
+    const buffer = n<=4 ? 0 : Math.ceil(n/4)+1;
+    return base + buffer;
+  }
+
   function buildAmericanoCounts(players, existingRounds){
     const ids = players.map(p=>p.id);
     const partnerCount = {}, opponentCount = {}, sitOutCount = {};
@@ -1378,11 +1392,7 @@
             <div class="switch ${d.rueckrunde?'on':''}" data-action="toggleRueckrunde"><div class="knob"></div></div>
           </div>
         </div>` : `
-        <div class="field">
-          <label>Anzahl Runden</label>
-          <input class="input" type="number" min="1" max="30" id="roundsInput" value="${d.rounds}">
-        </div>
-        <div class="banner-info">Bei ungerader Spielerzahl setzt die App reihum jemanden pro Runde aus — fair verteilt über das ganze Turnier.</div>
+        <div class="banner-info">Wie viele Runden sinnvoll sind, hängt von der Teilnehmerzahl ab — die App schlägt dir im nächsten Schritt automatisch eine passende Anzahl vor, damit möglichst jede:r mal mit jeder:m spielt. Bei ungerader Spielerzahl setzt die App reihum jemanden pro Runde aus — fair verteilt über das ganze Turnier.</div>
         `}` : `
         <div class="banner-info">Die Paarungen für Runde 1 werden zufällig ausgelost, sobald du den Turnierbaum erstellst. Bei ungerader Teamzahl bekommen einzelne Teams ein Freilos.</div>
         `}
@@ -1446,10 +1456,16 @@
           </div>
           ${state.createError ? `<div class="banner-error">${esc(state.createError)}</div>` : ""}
           ${d.players.length>=4 ? (()=>{
+            const recommended = optimalRoundsForPlayers(d.players.length);
             const maxSafe = estimateMaxRepeatFreeRounds(d.players.length);
             const over = d.rounds > maxSafe;
-            return `<div class="${over?'banner-error':'banner-info'}">Bei ${d.players.length} Teilnehmenden sind ca. ${maxSafe} Runden ohne Wiederholung derselben Begegnung möglich. ${over ? `Ihr habt ${d.rounds} Runden eingestellt — einige Begegnungen werden sich also zwangsläufig wiederholen.` : ''}</div>`;
-          })() : ""}
+            return `
+            <div class="field">
+              <label>Anzahl Runden</label>
+              <input class="input" type="number" min="1" max="30" id="roundsInput" value="${d.rounds}">
+            </div>
+            <div class="${over?'banner-error':'banner-info'}">Empfehlung für ${d.players.length} Teilnehmende: ${recommended} Runden, automatisch vorausgefüllt — damit möglichst jede:r mal mit jeder:m spielt. Änderbar, falls euch das zu lang ist.${over ? ` Achtung: ${d.rounds} Runden übersteigen die ca. ${maxSafe} Runden, ab denen sich Begegnungen ohnehin wiederholen müssten.` : ''}</div>`;
+          })() : `<div class="banner-info">Trage mindestens 4 Spieler:innen ein, dann schlägt dir die App automatisch eine passende Rundenzahl vor.</div>`}
           <div class="banner-info">Sobald die Runden erstellt sind, können keine Spieler:innen mehr ergänzt werden.</div>
           <button class="btn btn-primary" data-action="startTournament" ${d.players.length<4?"disabled":""}>Runden auslosen &amp; Turnier starten</button>
         </div>
@@ -1869,9 +1885,19 @@
     if(isIndividual){
       html += `<div class="section-title">Spieler:innen (${t.players.length}${t.players.length<4?' · mind. 4 nötig':''})</div>`;
       if(t.players.length>=4){
+        const recommended = optimalRoundsForPlayers(t.players.length);
         const maxSafe = estimateMaxRepeatFreeRounds(t.players.length);
-        const over = (t.rounds||6) > maxSafe;
-        html += `<div class="${over?'banner-error':'banner-info'}" style="margin-bottom:10px;">Bei ${t.players.length} Spieler:innen sind ca. ${maxSafe} Runden ohne Wiederholung derselben Begegnung möglich (eingestellt: ${t.rounds||6}).${over?' Einige Begegnungen werden sich also zwangsläufig wiederholen.':''}</div>`;
+        const currentRounds = t.rounds || recommended;
+        const over = currentRounds > maxSafe;
+        if(org){
+          html += `
+          <div class="field">
+            <label>Anzahl Runden</label>
+            <input class="input" type="number" min="1" max="60" id="liveRoundsInput" value="${currentRounds}">
+          </div>
+          <button class="btn btn-ghost btn-sm" style="margin-bottom:10px;" data-action="applyRecommendedRounds" data-rounds="${recommended}">Empfehlung übernehmen (${recommended} Runden)</button>`;
+        }
+        html += `<div class="${over?'banner-error':'banner-info'}" style="margin-bottom:10px;">Empfehlung für ${t.players.length} Spieler:innen: ${recommended} Runden, damit möglichst jede:r mal mit jeder:m spielt (eingestellt: ${currentRounds}).${over?' Das übersteigt die ca. '+maxSafe+' Runden, ab denen sich Begegnungen ohnehin wiederholen müssten.':''}</div>`;
       }
       html += t.players.length ? t.players.map((p,i)=>{
         const removable = isOrganizer(t) || p.id===state.identity.id;
@@ -2632,13 +2658,6 @@
         const tv = parseInt(targetEl.value,10);
         state.draft.setTarget = (!isNaN(tv) && tv>=3) ? Math.min(tv,12) : 6;
       }
-      if(state.draft.type==="liga" && state.draft.ligaMode==="individual"){
-        const roundsEl = document.getElementById("roundsInput");
-        if(roundsEl){
-          const rv = parseInt(roundsEl.value,10);
-          state.draft.rounds = (!isNaN(rv) && rv>0) ? Math.min(rv,30) : 6;
-        }
-      }
       state.createError="";
       state.view = "createTeams"; return render();
     }
@@ -2684,12 +2703,14 @@
       const name = document.getElementById("newPlayerName").value.trim();
       if(!name){ state.createError = "Bitte gib einen Namen ein."; return render(); }
       state.draft.players.push({ id: uid("p"), name });
+      if(state.draft.players.length>=4) state.draft.rounds = optimalRoundsForPlayers(state.draft.players.length);
       state.createError = "";
       return render();
     }
     if(action==="removePlayer"){
       const idx = parseInt(el.dataset.idx,10);
       state.draft.players.splice(idx,1);
+      if(state.draft.players.length>=4) state.draft.rounds = optimalRoundsForPlayers(state.draft.players.length);
       return render();
     }
 
@@ -2733,11 +2754,18 @@
           if(inGroup){
             if(!d.groupMembers) return;
             t.players = []; // Mitglieder treten selbst bei, siehe "Wird gebildet"-Ansicht
+            t.rounds = d.rounds || optimalRoundsForPlayers(4) || 6;
           } else {
             if(d.players.length<4) return;
             t.players = d.players;
+            const roundsEl = document.getElementById("roundsInput");
+            let rounds = optimalRoundsForPlayers(d.players.length);
+            if(roundsEl){
+              const rv = parseInt(roundsEl.value,10);
+              if(!isNaN(rv) && rv>0) rounds = Math.min(rv,60);
+            }
+            t.rounds = rounds;
           }
-          t.rounds = d.rounds || 6;
         }
       } else if(d.type==="ko"){
         if(!inGroup && d.teams.length<2) return;
@@ -2931,6 +2959,7 @@
       const existingMem = t.members.find(m=>m.userId===uidP);
       if(existingMem) existingMem.teamId = uidP;
       else t.members.push({ userId: uidP, name: gm.name, teamId: uidP });
+      if(t.players.length>=4) t.rounds = optimalRoundsForPlayers(t.players.length);
       await saveTournament(t);
       return render();
     }
@@ -2942,6 +2971,15 @@
       t.players = t.players.filter(p=>p.id!==pid);
       const mem = t.members.find(m=>m.userId===pid);
       if(mem) mem.teamId = null;
+      if(t.players.length>=4) t.rounds = optimalRoundsForPlayers(t.players.length);
+      await saveTournament(t);
+      return render();
+    }
+    if(action==="applyRecommendedRounds"){
+      const t = state.current;
+      if(!isOrganizer(t) || t.started) return;
+      const rv = parseInt(el.dataset.rounds,10);
+      if(!isNaN(rv) && rv>0) t.rounds = rv;
       await saveTournament(t);
       return render();
     }
@@ -2952,6 +2990,14 @@
       const min = isIndividual ? 4 : (t.type==="ko" ? 2 : 3);
       const count = isIndividual ? t.players.length : t.teams.length;
       if(count<min) return;
+      if(isIndividual){
+        const roundsEl = document.getElementById("liveRoundsInput");
+        if(roundsEl){
+          const rv = parseInt(roundsEl.value,10);
+          if(!isNaN(rv) && rv>0) t.rounds = Math.min(rv,60);
+        }
+        if(!t.rounds) t.rounds = optimalRoundsForPlayers(t.players.length);
+      }
       generateMatchesForTournament(t);
       await saveTournament(t);
       return render();
