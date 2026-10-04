@@ -66,6 +66,7 @@
     border-left:1px solid rgba(255,255,255,0.05);
     border-right:1px solid rgba(255,255,255,0.05);
   }
+  .wide-panel-title{ display:none; }
   .display{font-family:'Bebas Neue',sans-serif; letter-spacing:0.5px;}
   .mono{font-family:'JetBrains Mono',monospace;}
   .screen{padding:20px 18px 100px 18px; flex:1;}
@@ -304,6 +305,33 @@
     background:linear-gradient(135deg, var(--ball), #EAF59B); color:#12280F;
     border-radius:var(--radius); padding:18px; text-align:center;
     font-family:'Bebas Neue'; font-size:21px; letter-spacing:0.4px; margin-bottom:18px;
+  }
+  /* ---- Wide layout: desktop browser windows AND phones rotated to landscape ----
+     Pure CSS breakpoint so it reacts instantly to window resize / screen rotation,
+     no JS orientation-detection needed. Placed last so it reliably overrides the
+     base rules above regardless of property overlap (e.g. .screen padding). */
+  @media (min-width:760px), (orientation:landscape) and (min-width:560px){
+    body{ padding:28px 20px; align-items:flex-start; }
+    #app{
+      max-width:1180px; min-height:calc(100vh - 56px); border-radius:20px;
+      border:1px solid rgba(255,255,255,0.08); box-shadow:0 20px 60px rgba(0,0,0,0.45);
+    }
+    .narrow-form{ max-width:640px; margin:0 auto; }
+    .split-grid{ display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:28px; align-items:start; }
+    .split-grid.uneven{ grid-template-columns:minmax(0,1.3fr) minmax(0,1fr); }
+    .tabs.wide-hidden{ display:none; }
+    .tab-panel{ display:block !important; }
+    .wide-panel-title{ display:block; }
+    .modal-overlay{ align-items:center; padding:20px; }
+    .modal{ border-radius:20px; max-width:520px; max-height:85vh; }
+    .modal-handle{ display:none; }
+    .court-wrap{ max-width:420px; margin:0 auto; }
+    .ko-rounds-wide{
+      display:grid; grid-auto-flow:column; grid-auto-columns:minmax(240px,1fr);
+      gap:20px; overflow-x:auto; padding-bottom:8px; align-items:start;
+    }
+    .topbar{ padding-left:28px; padding-right:28px; }
+    .screen{ padding-left:28px; padding-right:28px; }
   }
 </style>
 </head>
@@ -1245,7 +1273,7 @@
   // ---------- Onboarding ----------
   function viewOnboarding(){
     return `
-    <div class="screen" style="padding-top:60px;">
+    <div class="screen narrow-form" style="padding-top:60px;">
       <div class="brand" style="justify-content:center;">
         <div class="ball-dot"></div>
         <div class="lockup">PADEL<span>MANAGER</span></div>
@@ -1315,26 +1343,32 @@
       ${notice ? `<div class="banner-error" style="margin-bottom:16px;">${esc(notice)}</div>` : ""}
       ${!window.__PADEL_SYNCED__ ? `<div class="banner-info" style="margin-bottom:16px;">Hinweis: Cloud-Speicher ist noch nicht eingerichtet — Turniere sind aktuell nur auf diesem Gerät sichtbar, Einladungen per Code funktionieren nicht geräteübergreifend. Trage deine Firebase-Konfiguration in firebase-config.js ein, damit alle jederzeit beitreten können.</div>` : ""}
 
-      <div class="section-title">Meine Gruppen</div>
-      ${ groups.length ? `<div class="stack">${groupItems}</div>` : `
-        <div class="empty">
-          <span class="ball-icon">👥</span>
-          Noch in keiner Gruppe. Feste Spielrunden legen hier gemeinsam Turniere an.
-        </div>` }
-      <div class="stack" style="margin-top:14px; margin-bottom:28px;">
-        <button class="btn btn-primary" data-action="goCreateGroup">+ Neue Gruppe erstellen</button>
-        <button class="btn btn-secondary" data-action="goJoinGroup">Gruppe per Code beitreten</button>
-      </div>
+      <div class="split-grid">
+        <div>
+          <div class="section-title">Meine Gruppen</div>
+          ${ groups.length ? `<div class="stack">${groupItems}</div>` : `
+            <div class="empty">
+              <span class="ball-icon">👥</span>
+              Noch in keiner Gruppe. Feste Spielrunden legen hier gemeinsam Turniere an.
+            </div>` }
+          <div class="stack" style="margin-top:14px; margin-bottom:28px;">
+            <button class="btn btn-primary" data-action="goCreateGroup">+ Neue Gruppe erstellen</button>
+            <button class="btn btn-secondary" data-action="goJoinGroup">Gruppe per Code beitreten</button>
+          </div>
+        </div>
 
-      <div class="section-title">Meine Turniere</div>
-      ${ list.length ? `<div class="stack">${items}</div>` : `
-        <div class="empty">
-          <span class="ball-icon">🎾</span>
-          Noch keine Turniere. Leg los oder tritt einem bei.
-        </div>` }
-      <div class="stack" style="margin-top:22px;">
-        <button class="btn btn-primary" data-action="goCreate">+ Neues Turnier erstellen</button>
-        <button class="btn btn-secondary" data-action="goJoin">Turnier per Code beitreten</button>
+        <div>
+          <div class="section-title">Meine Turniere</div>
+          ${ list.length ? `<div class="stack">${items}</div>` : `
+            <div class="empty">
+              <span class="ball-icon">🎾</span>
+              Noch keine Turniere. Leg los oder tritt einem bei.
+            </div>` }
+          <div class="stack" style="margin-top:22px;">
+            <button class="btn btn-primary" data-action="goCreate">+ Neues Turnier erstellen</button>
+            <button class="btn btn-secondary" data-action="goJoin">Turnier per Code beitreten</button>
+          </div>
+        </div>
       </div>
     </div>`;
   }
@@ -1351,7 +1385,7 @@
       <div class="back-btn" data-action="${d.groupCode?'backToGroup':'goHome'}">←</div>
       <div><h1>Neues Turnier</h1><div class="sub">${d.groupCode && state.currentGroup ? `Für Gruppe „${esc(state.currentGroup.name)}" · ` : ""}Schritt 1 von 2 · Grunddaten</div></div>
     </div>
-    <div class="screen" style="padding-top:6px;">
+    <div class="screen narrow-form" style="padding-top:6px;">
       <div class="stack">
         <div class="field">
           <label>Turniername</label>
@@ -1420,7 +1454,7 @@
         <div class="back-btn" data-action="backToStep1">←</div>
         <div><h1>Spieler:innen</h1><div class="sub">Schritt 2 von 2 · Beitritt folgt im Turnier</div></div>
       </div>
-      <div class="screen" style="padding-top:6px;">
+      <div class="screen narrow-form" style="padding-top:6px;">
         <div class="stack">
           <div class="banner-info">Niemand wird automatisch eingetragen. Mitglieder treten dem Turnier selbst als Spieler:in bei, sobald es angelegt ist — mindestens 4 werden zum Starten benötigt. Gruppe hat aktuell ${members.length} Mitglieder.${members.length<4?' Das reicht noch nicht für Ohne-feste-Teams-Liga.':''}</div>
           ${rows}
@@ -1442,7 +1476,7 @@
         <div class="back-btn" data-action="backToStep1">←</div>
         <div><h1>Spieler:innen</h1><div class="sub">Schritt 2 von 2 · mind. 4 Spieler:innen</div></div>
       </div>
-      <div class="screen" style="padding-top:6px;">
+      <div class="screen narrow-form" style="padding-top:6px;">
         <div class="stack">
           ${rows}
           <div class="card">
@@ -1537,7 +1571,7 @@
       <div class="back-btn" data-action="backToStep1">←</div>
       <div><h1>Teams</h1><div class="sub">Schritt 2 von 2 · ${inGroup ? "Teams sind optional, könnt ihr auch später bilden" : `mind. ${min} Teams`}</div></div>
     </div>
-    <div class="screen" style="padding-top:6px;">
+    <div class="screen narrow-form" style="padding-top:6px;">
       <div class="stack">
         ${teamRows}
         ${formationHtml}
@@ -1565,7 +1599,7 @@
       <div class="back-btn" data-action="goHome">←</div>
       <div><h1>Turnier beitreten</h1><div class="sub">Code vom Turnierleiter eingeben</div></div>
     </div>
-    <div class="screen" style="padding-top:6px;">
+    <div class="screen narrow-form" style="padding-top:6px;">
       <div class="stack">
         <div class="field">
           <label>Einladungscode</label>
@@ -1585,7 +1619,7 @@
       <div class="back-btn" data-action="goHome">←</div>
       <div><h1>Neue Gruppe</h1><div class="sub">Für eure feste Spielrunde</div></div>
     </div>
-    <div class="screen" style="padding-top:6px;">
+    <div class="screen narrow-form" style="padding-top:6px;">
       <div class="stack">
         <div class="field">
           <label>Gruppenname</label>
@@ -1604,7 +1638,7 @@
       <div class="back-btn" data-action="goHome">←</div>
       <div><h1>Gruppe beitreten</h1><div class="sub">Code vom Gruppenleiter eingeben</div></div>
     </div>
-    <div class="screen" style="padding-top:6px;">
+    <div class="screen narrow-form" style="padding-top:6px;">
       <div class="stack">
         <div class="field">
           <label>Einladungscode</label>
@@ -1674,14 +1708,20 @@
       <button class="icon-btn" style="font-size:22px;" data-action="openGroupInvite" title="Einladen">＋👤</button>
     </div>
     <div class="screen" style="padding-top:6px;">
-      <div class="section-title">Gesamttabelle</div>
-      <div class="banner-info" style="margin-bottom:14px;">Punkte aus allen beendeten Turnieren dieser Gruppe. Die genaue Gewichtung feilen wir später noch aus.</div>
-      ${groupPointsTable(g)}
-      ${admin ? `<button class="btn btn-ghost btn-sm" style="margin-top:10px;" data-action="recalcGroupStats">🔄 Tabelle neu berechnen</button>` : ""}
+      <div class="split-grid uneven">
+        <div>
+          <div class="section-title">Gesamttabelle</div>
+          <div class="banner-info" style="margin-bottom:14px;">Punkte aus allen beendeten Turnieren dieser Gruppe. Die genaue Gewichtung feilen wir später noch aus.</div>
+          ${groupPointsTable(g)}
+          ${admin ? `<button class="btn btn-ghost btn-sm" style="margin-top:10px;" data-action="recalcGroupStats">🔄 Tabelle neu berechnen</button>` : ""}
+        </div>
 
-      <div class="section-title">Turniere in dieser Gruppe</div>
-      ${tournCards}
-      ${admin ? `<button class="btn btn-primary" style="margin-top:14px;" data-action="goCreateInGroup">+ Neues Turnier in dieser Gruppe</button>` : `<div class="banner-info" style="margin-top:14px;">Nur der Gruppenleiter kann neue Turniere anlegen.</div>`}
+        <div>
+          <div class="section-title">Turniere in dieser Gruppe</div>
+          ${tournCards}
+          ${admin ? `<button class="btn btn-primary" style="margin-top:14px;" data-action="goCreateInGroup">+ Neues Turnier in dieser Gruppe</button>` : `<div class="banner-info" style="margin-top:14px;">Nur der Gruppenleiter kann neue Turniere anlegen.</div>`}
+        </div>
+      </div>
 
       <button class="btn btn-danger" style="margin-top:26px;" data-action="deleteGroup">${isGroupLeader(g) ? "🗑 Gruppe löschen" : "Gruppe verlassen"}</button>
     </div>`;
@@ -1857,14 +1897,15 @@
       return html + `<div class="empty">Du bist keinem Team zugeordnet.</div>`;
     }
     let any = false;
+    let columns = "";
     for(let r=0;r<=maxRound;r++){
       let matches = t.matches.filter(m=>m.roundIndex===r).sort((a,b)=>a.slotIndex-b.slotIndex);
       if(mine) matches = matches.filter(m=>isMyMatch(t,m));
       if(mine && !matches.length) continue;
       any = true;
-      html += `<div class="leg-badge">${esc(roundName(r,totalRounds))}</div>`;
-      html += matches.map(m=>matchCardHtml(t,m,null)).join("");
+      columns += `<div><div class="leg-badge">${esc(roundName(r,totalRounds))}</div>${matches.map(m=>matchCardHtml(t,m,null)).join("")}</div>`;
     }
+    html += `<div class="ko-rounds-wide">${columns}</div>`;
     if(mine && !any) html += `<div class="empty">Keine eigenen Spiele (evtl. schon ausgeschieden).</div>`;
     return html;
   }
@@ -1996,13 +2037,23 @@
 
     let body;
     if(!t.started){
-      body = renderFormingState(t);
+      body = `<div class="narrow-form" style="padding:0;">${renderFormingState(t)}</div>`;
     } else if(isKO){
       body = renderKOBracket(t);
-    } else if(isIndividual){
-      body = state.tab==="table" ? renderIndividualStandings(t) : renderIndividualRounds(t);
     } else {
-      body = state.tab==="table" ? renderTeamStandings(t) : renderTeamMatches(t);
+      const tablePanel = isIndividual ? renderIndividualStandings(t) : renderTeamStandings(t);
+      const matchesPanel = isIndividual ? renderIndividualRounds(t) : renderTeamMatches(t);
+      body = `
+      <div class="split-grid">
+        <div class="tab-panel" data-tab="table" style="${state.tab==='table'?'':'display:none;'}">
+          <div class="wide-panel-title section-title">Tabelle</div>
+          ${tablePanel}
+        </div>
+        <div class="tab-panel" data-tab="matches" style="${state.tab==='matches'?'':'display:none;'}">
+          <div class="wide-panel-title section-title">${isIndividual?'Runden':'Spiele'}</div>
+          ${matchesPanel}
+        </div>
+      </div>`;
     }
 
     const showTabs = t.started && !isKO;
@@ -2021,7 +2072,7 @@
       ${t.finished ? `<div class="champion-banner">🏁 Turnier beendet — Punkte wurden der Gruppe gutgeschrieben</div>` : ""}
       ${(!org && !mem) ? `<div class="banner-info" style="display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:14px;"><span>Du bist noch nicht beigetreten.</span><button class="btn btn-secondary btn-sm" data-action="joinAsSpectator">Als Zuschauer:in beitreten</button></div>` : ""}
       ${showTabs ? `
-      <div class="tabs">
+      <div class="tabs wide-hidden">
         <div class="tab ${state.tab==='table'?'active':''}" data-action="switchTab" data-tab="table">Tabelle</div>
         <div class="tab ${state.tab==='matches'?'active':''}" data-action="switchTab" data-tab="matches">${isIndividual?'Runden':'Spiele'}</div>
       </div>` : ""}
