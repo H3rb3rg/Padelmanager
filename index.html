@@ -824,6 +824,10 @@
   }
   function tournamentWinnerName(t){
     if(!t.finished) return null;
+    if(t.archive){
+      const ids = (t.podium && t.podium.first) || [];
+      return ids.length ? ids.map(id=>playerName(t,id)).join(" & ") : null;
+    }
     if(t.type==="ko"){
       return t.champion ? teamName(t, t.champion) : null;
     }
@@ -1108,6 +1112,14 @@
       g.tournamentWinsTable[userId] = (g.tournamentWinsTable[userId]||0) + 1;
     };
 
+    // Archiv-Turnier (nur Platzierungen, keine Einzelspiele): Teilnahme, Sieg (Gold), Silber/Bronze.
+    if(t.archive){
+      (t.players||[]).forEach(pl=> addPlayed(pl.id));
+      ((t.podium||{}).first||[]).forEach(addWin);
+      creditGroupMatchStats(g, t);
+      return;
+    }
+
     if(t.type==="liga" && t.ligaMode==="individual"){
       const rows = computeIndividualStandings(t);
       rows.forEach((r,i)=>{
@@ -1152,6 +1164,11 @@
       add("matchWinsTable", userId, w); add("matchLossesTable", userId, l);
       add("pointsForTable", userId, pf); add("pointsAgainstTable", userId, pa);
     };
+    if(t.archive){
+      ((t.podium||{}).second||[]).forEach(id=> add("silverTable", id, 1));
+      ((t.podium||{}).third||[]).forEach(id=> add("bronzeTable", id, 1));
+      return;
+    }
     if(t.type==="liga" && t.ligaMode==="individual"){
       computeIndividualStandings(t).forEach((r,i)=>{
         credit(r.player.id, r.wins, r.losses, r.gamesW, r.gamesL);
@@ -1904,12 +1921,12 @@
       const statusLabel = t.finished ? "Beendet" : (t.started ? "Läuft" : "Wird gebildet");
       const winner = t.finished ? tournamentWinnerName(t) : null;
       return `
-      <div class="tourn-card" data-action="openDetail" data-code="${esc(t.code)}" style="border-left-color:var(--pcourt);">
+      <div class="tourn-card" data-action="${t.archive?'openArchive':'openDetail'}" data-code="${esc(t.code)}" style="border-left-color:var(--pcourt);">
         <div class="name">${esc(t.name)}</div>
         <div class="meta">
-          <span class="pill">${esc(typeLabel)}</span>
+          <span class="pill">${esc(t.archive ? "Archiv" + (t.date ? " · " + fmtDate(t.date) : "") : typeLabel)}</span>
           <span class="pill muted">${esc(countLabel)}</span>
-          <span class="pill muted">${esc(statusLabel)}</span>
+          ${t.archive ? "" : `<span class="pill muted">${esc(statusLabel)}</span>`}
           ${winner ? `<span class="pill">🏆 ${esc(winner)}</span>` : ""}
         </div>
       </div>`;
@@ -1936,7 +1953,8 @@
         <div>
           <div class="section-title">Turniere in dieser Gruppe</div>
           ${tournCards}
-          ${admin ? `<button class="btn btn-primary" style="margin-top:14px;" data-action="goCreateInGroup">+ Neues Turnier in dieser Gruppe</button>` : `<div class="banner-info" style="margin-top:14px;">Nur der Gruppenleiter kann neue Turniere anlegen.</div>`}
+          ${admin ? `<button class="btn btn-primary" style="margin-top:14px;" data-action="goCreateInGroup">+ Neues Turnier in dieser Gruppe</button>
+          <button class="btn btn-secondary" style="margin-top:10px;" data-action="openArchiveImport">📥 Archiv-Turniere importieren</button>` : `<div class="banner-info" style="margin-top:14px;">Nur der Gruppenleiter kann neue Turniere anlegen.</div>`}
         </div>
       </div>
 
@@ -2328,8 +2346,96 @@
     if(state.modal==="link") return modalLink();
     if(state.modal==="editTournamentName") return modalEditTournamentName();
     if(state.modal==="editGroupName") return modalEditGroupName();
+    if(state.modal==="archiveImport") return modalArchiveImport();
+    if(state.modal==="archive") return modalArchive();
     if(state.modal==="editTeamName") return modalEditTeamName();
     return "";
+  }
+
+  function fmtDate(iso){
+    const m = String(iso||"").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    return m ? `${m[3]}.${m[2]}.${m[1]}` : "";
+  }
+  function splitNames(str){
+    return String(str||"").split(/[,;]/).map(x=>x.trim()).filter(Boolean);
+  }
+  // Format: Kopfzeile "Name | TT.MM.JJJJ", dann "1: A, B", "2: ...", "3: ...", "Teilnehmer: ..."
+  function parseArchiveText(text){
+    const list = [], errors = [];
+    let cur = null;
+    String(text||"").split(/\r?\n/).forEach((raw, i)=>{
+      const line = raw.trim();
+      if(!line) return;
+      let m;
+      if((m = line.match(/^([123])\s*:\s*(.*)$/))){
+        if(!cur){ errors.push(`Zeile ${i+1}: Platzierung ohne Turnier-Kopfzeile.`); return; }
+        cur.pod[+m[1]-1] = splitNames(m[2]);
+      } else if((m = line.match(/^Teilnehmer\s*:\s*(.*)$/i))){
+        if(!cur){ errors.push(`Zeile ${i+1}: Teilnehmer ohne Turnier-Kopfzeile.`); return; }
+        cur.extra = splitNames(m[1]);
+      } else {
+        const parts = line.split("|");
+        const name = parts[0].trim();
+        let date = null;
+        if(parts[1]){
+          const d = parts[1].trim().match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+          if(d) date = `${d[3]}-${d[2].padStart(2,"0")}-${d[1].padStart(2,"0")}`;
+          else errors.push(`Zeile ${i+1}: Datum bitte als TT.MM.JJJJ schreiben.`);
+        }
+        cur = { name, date, pod:[[],[],[]], extra:[] };
+        list.push(cur);
+      }
+    });
+    list.forEach(t=>{ if(!t.pod[0].length) errors.push(`„${t.name}“: Platz 1 fehlt.`); });
+    return { list, errors };
+  }
+  const ARCHIVE_EXAMPLE = "Padel Turnier 1.0 | 16.02.2025\n1: Anna, Ben\n2: Cara, Dan\n3: Emil\nTeilnehmer: Anna, Ben, Cara, Dan, Emil, Finn";
+
+  function modalArchiveImport(){
+    const d = state.modalData || {};
+    return `
+    <div class="modal-overlay" data-action="closeModalBg">
+      <div class="modal" onclick="event.stopPropagation()">
+        <div class="modal-handle"></div>
+        <h2>Archiv-Turniere importieren</h2>
+        <div class="modal-sub">Vergangene Turniere mit Platz 1–3. Pro Turnier: Kopfzeile „Name | Datum“, dann Zeilen „1:“, „2:“, „3:“ (Namen mit Komma) und „Teilnehmer:“ für alle, die mitgespielt haben. Unbekannte Namen werden als Mitglieder ohne App angelegt.</div>
+        <div class="field">
+          <textarea class="input" id="archiveInput" rows="9" placeholder="${esc(ARCHIVE_EXAMPLE)}" style="font-size:13px;">${esc(d.text||"")}</textarea>
+        </div>
+        ${d.error ? `<div class="banner-error" style="margin-top:10px; white-space:pre-line;">${esc(d.error)}</div>` : ""}
+        ${d.result ? `<div class="banner-info" style="margin-top:10px; white-space:pre-line;">${esc(d.result)}</div>` : ""}
+        <div class="stack" style="margin-top:16px;">
+          <button class="btn btn-primary" data-action="applyArchiveImport">Importieren</button>
+          <button class="btn btn-ghost" data-action="closeModal">Schließen</button>
+        </div>
+      </div>
+    </div>`;
+  }
+  function modalArchive(){
+    const t = (state.currentGroupTournaments||[]).find(x=>x.code===state.modalData.code);
+    if(!t) return "";
+    const g = state.currentGroup;
+    const nm = (ids)=> (ids||[]).map(id=>playerName(t,id)).join(", ") || "–";
+    const pod = t.podium || {};
+    const admin = isGroupAdmin(g);
+    return `
+    <div class="modal-overlay" data-action="closeModalBg">
+      <div class="modal" onclick="event.stopPropagation()">
+        <div class="modal-handle"></div>
+        <h2>${esc(t.name)}</h2>
+        <div class="modal-sub">Archiv-Turnier${t.date ? " · " + esc(fmtDate(t.date)) : ""} · ${t.players.length} Teilnehmer:innen</div>
+        <div class="stack">
+          <div class="team-row"><div class="team-avatar">🥇</div><div class="t-info"><div class="t-name">${esc(nm(pod.first))}</div></div></div>
+          <div class="team-row"><div class="team-avatar">🥈</div><div class="t-info"><div class="t-name">${esc(nm(pod.second))}</div></div></div>
+          <div class="team-row"><div class="team-avatar">🥉</div><div class="t-info"><div class="t-name">${esc(nm(pod.third))}</div></div></div>
+        </div>
+        <div style="margin-top:12px; font-size:12.5px; color:var(--text-soft); line-height:1.5;">Alle Teilnehmer: ${esc(t.players.map(x=>x.name).join(", "))}</div>
+        ${admin ? (state.modalData.confirmDel
+          ? `<button class="btn btn-danger" style="margin-top:16px;" data-action="confirmDeleteArchive">Wirklich löschen (Statistik wird zurückgerechnet)</button>`
+          : `<button class="btn btn-secondary" style="margin-top:16px;" data-action="deleteArchive">Archiv-Turnier löschen</button>`) : ""}
+        <button class="btn btn-ghost" style="margin-top:10px;" data-action="closeModal">Schließen</button>
+      </div>
+    </div>`;
   }
 
   function modalEditGroupName(){
@@ -2448,9 +2554,10 @@
       else if(mem.promoted) roleBadge = "Co-Leiter";
       const pts = (g.pointsTable && g.pointsTable[mem.userId]) || 0;
 
-      const controls = (mem.placeholder && admin) ? `
+      const controls = mem.placeholder ? `
         <div class="row" style="margin:-4px 0 10px 0; gap:8px;">
-          <button class="btn btn-danger btn-sm" style="flex:1;" data-action="removeGroupMember" data-user="${esc(mem.userId)}">Entfernen</button>
+          <button class="btn btn-secondary btn-sm" style="flex:1;" data-action="claimPlaceholder" data-user="${esc(mem.userId)}">Das bin ich</button>
+          ${admin ? `<button class="btn btn-danger btn-sm" style="flex:1;" data-action="removeGroupMember" data-user="${esc(mem.userId)}">Entfernen</button>` : ""}
         </div>` : (leader && !isLeader) ? `
         <div class="row" style="margin:-4px 0 10px 0; gap:8px;">
           <button class="btn ${mem.promoted?'btn-secondary':'btn-ghost'} btn-sm" style="flex:1;" data-action="toggleGroupPromote" data-user="${esc(mem.userId)}">${mem.promoted?"Co-Leiter entfernen":"Zu Co-Leiter machen"}</button>
@@ -2981,6 +3088,111 @@
       if(!isGroupLeader(g)) return;
       const mem = g.members.find(m=>m.userId===el.dataset.user);
       if(mem){ mem.promoted = !mem.promoted; await saveGroup(g); }
+      return render();
+    }
+    if(action==="openArchiveImport"){
+      if(!isGroupAdmin(state.currentGroup)) return;
+      state.modal = "archiveImport"; state.modalData = {}; return render();
+    }
+    if(action==="openArchive"){
+      state.modal = "archive"; state.modalData = { code: el.dataset.code }; return render();
+    }
+    if(action==="deleteArchive"){ state.modalData.confirmDel = true; return render(); }
+    if(action==="confirmDeleteArchive"){
+      const g0 = state.currentGroup;
+      if(!isGroupAdmin(g0)) return;
+      const code = state.modalData.code;
+      const t = await loadTournament(code);
+      const g = (await loadGroup(g0.code)) || g0;
+      if(t && t.archive){
+        const tmp = normalizeGroup({});
+        creditGroupPoints(tmp, t);
+        ["pointsTable","tournamentsPlayedTable","tournamentWinsTable"].concat(MATCH_STAT_KEYS).forEach(k=>{
+          Object.keys(tmp[k]||{}).forEach(u=>{ g[k][u] = Math.max(0, (g[k][u]||0) - tmp[k][u]); });
+        });
+        await sDelete("tournament:"+code, true);
+      }
+      g.tournamentCodes = g.tournamentCodes.filter(c=>c!==code);
+      await saveGroup(g);
+      state.currentGroup = g;
+      await refreshGroupTournaments(g);
+      state.modal = null; state.modalData = {};
+      return render();
+    }
+    if(action==="applyArchiveImport"){
+      const g0 = state.currentGroup;
+      if(!isGroupAdmin(g0)) return;
+      const txt = document.getElementById("archiveInput").value;
+      const { list, errors } = parseArchiveText(txt);
+      if(!list.length && !errors.length) errors.push("Bitte füge zuerst die Turnierdaten ein.");
+      if(errors.length){ state.modalData = { error: errors.join("\n"), text: txt }; return render(); }
+      const g = (await loadGroup(g0.code)) || g0;
+      await refreshGroupTournaments(g);
+      const existing = new Set((state.currentGroupTournaments||[]).filter(x=>x.archive).map(x=>x.name.toLowerCase()));
+      const createdNames = [];
+      const idFor = (n)=>{
+        let m = g.members.find(x=>x.name.trim().toLowerCase()===n.toLowerCase());
+        if(!m){ m = { userId: uid("g"), name: n, promoted:false, placeholder:true }; g.members.push(m); createdNames.push(n); }
+        return m.userId;
+      };
+      let imported = 0; const skipped = [];
+      for(const e of list){
+        if(existing.has(e.name.toLowerCase())){ skipped.push(e.name); continue; }
+        const all = [];
+        const podium = {
+          first: e.pod[0].map(idFor), second: e.pod[1].map(idFor), third: e.pod[2].map(idFor)
+        };
+        [].concat(e.pod[0], e.pod[1], e.pod[2], e.extra).forEach(n=>{
+          const id = idFor(n);
+          if(!all.includes(id)) all.push(id);
+        });
+        const code = genCode();
+        const doc = {
+          code, name: e.name, type:"liga", ligaMode:"individual", archive:true, date: e.date,
+          players: all.map(id=>({ id, name: g.members.find(m=>m.userId===id).name })),
+          members: [], teams: [], matches: [], ligaRounds: [],
+          started:true, finished:true, pointsAwarded:true, groupCode: g.code, setTarget:6,
+          organizerId: state.identity.id, podium,
+          createdAt: Date.now(), updatedAt: e.date ? new Date(e.date+"T12:00:00").getTime() : Date.now()
+        };
+        await sSet("tournament:"+code, doc, true);
+        g.tournamentCodes.push(code);
+        creditGroupPoints(g, doc);
+        imported++;
+      }
+      await saveGroup(g);
+      state.currentGroup = g;
+      await refreshGroupTournaments(g);
+      const msg = [`${imported} Turnier(e) importiert.`];
+      if(createdNames.length) msg.push(`Neu als Mitglieder ohne App angelegt: ${createdNames.join(", ")}.`);
+      if(skipped.length) msg.push(`Übersprungen (gibt es schon): ${skipped.join(", ")}.`);
+      state.modalData = { result: msg.join("\n") };
+      return render();
+    }
+    if(action==="claimPlaceholder"){
+      const g0 = state.currentGroup;
+      const phId = el.dataset.user, realId = state.identity.id;
+      const g = (await loadGroup(g0.code)) || g0;
+      const ph = g.members.find(m=>m.userId===phId);
+      if(!ph || !ph.placeholder || !g.members.find(m=>m.userId===realId)) return;
+      ["pointsTable","tournamentsPlayedTable","tournamentWinsTable"].concat(MATCH_STAT_KEYS).forEach(k=>{
+        if(g[k] && g[k][phId]!=null){ g[k][realId] = (g[k][realId]||0) + g[k][phId]; delete g[k][phId]; }
+      });
+      g.members = g.members.filter(m=>m.userId!==phId);
+      const all = await Promise.all(g.tournamentCodes.map(c=>loadTournament(c)));
+      await Promise.all(all.map(async (t)=>{
+        if(!t || !t.archive || !t.players.some(x=>x.id===phId)) return;
+        const hadReal = t.players.some(x=>x.id===realId);
+        t.players = t.players.filter(x=>x.id!==phId);
+        if(!hadReal) t.players.push({ id: realId, name: state.identity.name });
+        ["first","second","third"].forEach(k=>{
+          t.podium[k] = Array.from(new Set((t.podium[k]||[]).map(id=> id===phId ? realId : id)));
+        });
+        await sSet("tournament:"+t.code, t, true);
+      }));
+      await saveGroup(g);
+      state.currentGroup = g;
+      await refreshGroupTournaments(g);
       return render();
     }
     if(action==="addGroupPlaceholder"){
