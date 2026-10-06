@@ -1041,8 +1041,8 @@
     const idx = list.indexOf(code);
     if(idx>=0){ list.splice(idx,1); await sSet("my-group-codes", list, false); await pushUserData({ groups: list }); }
   }
-  const MATCH_STAT_KEYS = ["matchWinsTable","matchLossesTable","pointsForTable","pointsAgainstTable"];
-  const MATCH_STATS_VERSION = 1;
+  const MATCH_STAT_KEYS = ["matchWinsTable","matchLossesTable","pointsForTable","pointsAgainstTable","silverTable","bronzeTable"];
+  const MATCH_STATS_VERSION = 2;
   function normalizeGroup(g){
     if(!g) return g;
     if(!g.members) g.members = [];
@@ -1153,10 +1153,18 @@
       add("pointsForTable", userId, pf); add("pointsAgainstTable", userId, pa);
     };
     if(t.type==="liga" && t.ligaMode==="individual"){
-      computeIndividualStandings(t).forEach(r=> credit(r.player.id, r.wins, r.losses, r.gamesW, r.gamesL));
+      computeIndividualStandings(t).forEach((r,i)=>{
+        credit(r.player.id, r.wins, r.losses, r.gamesW, r.gamesL);
+        if(i===1) add("silverTable", r.player.id, 1);
+        if(i===2) add("bronzeTable", r.player.id, 1);
+      });
     } else if(t.type==="liga" && t.ligaMode==="teams"){
-      computeStandings(t).forEach(r=>{
-        (r.team.memberUserIds||[]).forEach(uid=> credit(uid, r.wins, r.losses, r.gamesW, r.gamesL));
+      computeStandings(t).forEach((r,i)=>{
+        (r.team.memberUserIds||[]).forEach(uid=>{
+          credit(uid, r.wins, r.losses, r.gamesW, r.gamesL);
+          if(i===1) add("silverTable", uid, 1);
+          if(i===2) add("bronzeTable", uid, 1);
+        });
       });
     } else if(t.type==="ko"){
       t.teams.forEach(team=>{
@@ -1172,6 +1180,13 @@
         });
         (team.memberUserIds||[]).forEach(uid=> credit(uid, w, l, pf, pa));
       });
+      // Silber = unterlegener Finalist (K.-o. hat kein Spiel um Platz 3)
+      const fin = t.matches.filter(m=>!m.bye).reduce((a,m)=> (!a || m.roundIndex>a.roundIndex) ? m : a, null);
+      if(fin && t.champion){
+        const silverId = [fin.teamAId, fin.teamBId].find(id=> id && id!==t.champion);
+        const st = t.teams.find(x=>x.id===silverId);
+        if(st) (st.memberUserIds||[]).forEach(uid=> add("silverTable", uid, 1));
+      }
     }
   }
   function removeUserFromGroupStats(g, userId){
@@ -1840,31 +1855,35 @@
 
   function groupPointsTable(g){
     const rows = g.members.map(mem=>{
-      const points = (g.pointsTable && g.pointsTable[mem.userId]) || 0;
-      const played = (g.tournamentsPlayedTable && g.tournamentsPlayedTable[mem.userId]) || 0;
-      const wins = (g.tournamentWinsTable && g.tournamentWinsTable[mem.userId]) || 0;
-      const ratio = played>0 ? wins/played : 0;
-      const mW = (g.matchWinsTable && g.matchWinsTable[mem.userId]) || 0;
-      const mL = (g.matchLossesTable && g.matchLossesTable[mem.userId]) || 0;
-      const pF = (g.pointsForTable && g.pointsForTable[mem.userId]) || 0;
-      const pA = (g.pointsAgainstTable && g.pointsAgainstTable[mem.userId]) || 0;
-      return { mem, points, played, wins, ratio, mW, mL, pF, pA };
-    }).sort((a,b)=> b.ratio-a.ratio || b.points-a.points);
+      const tb = (k)=> (g[k] && g[k][mem.userId]) || 0;
+      const points = tb("pointsTable"), played = tb("tournamentsPlayedTable");
+      const gold = tb("tournamentWinsTable"), silver = tb("silverTable"), bronze = tb("bronzeTable");
+      const mW = tb("matchWinsTable"), mL = tb("matchLossesTable");
+      const pF = tb("pointsForTable"), pA = tb("pointsAgainstTable");
+      const ratio = played>0 ? gold/played : 0;
+      const mRatio = (mW+mL)>0 ? mW/(mW+mL) : 0;
+      return { mem, points, played, gold, silver, bronze, ratio, mW, mL, pF, pA, mRatio };
+    }).sort((a,b)=>
+      b.gold-a.gold || b.silver-a.silver || b.bronze-a.bronze ||
+      b.ratio-a.ratio || b.mRatio-a.mRatio || b.points-a.points || b.played-a.played ||
+      a.mem.name.localeCompare(b.mem.name));
     return `
     <div style="overflow-x:auto;">
     <table class="standings">
-      <thead><tr><th class="left">Mitglied</th><th>Turniere</th><th>Siege</th><th>Quote</th><th>Punkte</th><th class="wide-col">Spiel&shy;siege</th><th class="wide-col">Spiel&shy;nieder&shy;lagen</th><th class="wide-col">Spiel&shy;quote</th><th class="wide-col">Spiel&shy;punkte</th></tr></thead>
+      <thead><tr><th class="left">Mitglied</th><th>🥇</th><th>🥈</th><th>🥉</th><th class="wide-col">Turniere</th><th class="wide-col">Quote</th><th class="wide-col">Punkte</th><th class="wide-col">Spiel&shy;siege</th><th class="wide-col">Spiel&shy;nieder&shy;lagen</th><th class="wide-col">Spiel&shy;quote</th><th class="wide-col">Spiel&shy;punkte</th></tr></thead>
       <tbody>
         ${rows.map((r,i)=>`
           <tr>
-            <td class="left"><span class="rank">${i+1}</span>&nbsp; ${esc(r.mem.name)}${r.mem.userId===g.leaderId?" (Gruppenleiter)":(r.mem.promoted?" (Co-Gruppenleiter)":"")}</td>
-            <td>${r.played}</td>
-            <td>${r.wins}</td>
-            <td class="mono">${r.played>0 ? Math.round(r.ratio*100)+"%" : "–"}</td>
-            <td class="pts">${r.points}</td>
+            <td class="left"><span class="rank">${i+1}</span>&nbsp; ${esc(r.mem.name)}</td>
+            <td>${r.gold}</td>
+            <td>${r.silver}</td>
+            <td>${r.bronze}</td>
+            <td class="wide-col">${r.played}</td>
+            <td class="wide-col mono">${r.played>0 ? Math.round(r.ratio*100)+"%" : "–"}</td>
+            <td class="wide-col pts">${r.points}</td>
             <td class="wide-col">${r.mW}</td>
             <td class="wide-col">${r.mL}</td>
-            <td class="wide-col mono">${(r.mW+r.mL)>0 ? Math.round(r.mW/(r.mW+r.mL)*100)+"%" : "–"}</td>
+            <td class="wide-col mono">${(r.mW+r.mL)>0 ? Math.round(r.mRatio*100)+"%" : "–"}</td>
             <td class="wide-col mono">${r.pF}:${r.pA}</td>
           </tr>`).join("")}
       </tbody>
@@ -2429,7 +2448,10 @@
       else if(mem.promoted) roleBadge = "Co-Leiter";
       const pts = (g.pointsTable && g.pointsTable[mem.userId]) || 0;
 
-      const controls = (leader && !isLeader) ? `
+      const controls = (mem.placeholder && admin) ? `
+        <div class="row" style="margin:-4px 0 10px 0; gap:8px;">
+          <button class="btn btn-danger btn-sm" style="flex:1;" data-action="removeGroupMember" data-user="${esc(mem.userId)}">Entfernen</button>
+        </div>` : (leader && !isLeader) ? `
         <div class="row" style="margin:-4px 0 10px 0; gap:8px;">
           <button class="btn ${mem.promoted?'btn-secondary':'btn-ghost'} btn-sm" style="flex:1;" data-action="toggleGroupPromote" data-user="${esc(mem.userId)}">${mem.promoted?"Co-Leiter entfernen":"Zu Co-Leiter machen"}</button>
           <button class="btn btn-danger btn-sm" style="flex:1;" data-action="removeGroupMember" data-user="${esc(mem.userId)}">Entfernen</button>
@@ -2440,7 +2462,7 @@
         <div class="team-avatar">${esc((mem.name[0]||"?").toUpperCase())}</div>
         <div class="t-info">
           <div class="t-name">${esc(mem.name)}${isLeader?" (Gruppenleiter)":(mem.promoted?" (Co-Gruppenleiter)":"")}</div>
-          <div class="t-players">${esc(roleBadge)} · ${pts} Pkt.</div>
+          <div class="t-players">${esc(mem.placeholder ? "Ohne App" : roleBadge)} · ${pts} Pkt.</div>
         </div>
       </div>
       ${controls}`;
@@ -2453,6 +2475,13 @@
         <h2>Gruppenmitglieder</h2>
         <div class="modal-sub">${g.members.length} dabei. ${leader ? "Als Gruppenleiter kannst du Co-Leiter ernennen oder Mitglieder entfernen." : ""}</div>
         <div class="stack">${rows}</div>
+        ${admin ? `
+        <div class="field" style="margin-top:16px;">
+          <label>Mitglied ohne App hinzufügen</label>
+          <input class="input" id="addMemberInput" placeholder="Name, z. B. Johnny" maxlength="40">
+        </div>
+        ${state.editNameError ? `<div class="banner-error" style="margin-top:10px;">${esc(state.editNameError)}</div>` : ""}
+        <button class="btn btn-secondary" style="margin-top:10px;" data-action="addGroupPlaceholder">+ Hinzufügen</button>` : ""}
         <button class="btn btn-ghost" style="margin-top:16px;" data-action="closeModal">Schließen</button>
       </div>
     </div>`;
@@ -2946,7 +2975,7 @@
       else { try{ await navigator.clipboard.writeText(text); el.textContent="Text kopiert ✓"; setTimeout(()=>render(),1400);}catch(e){} }
       return;
     }
-    if(action==="openGroupMembers"){ state.modal="groupMembers"; return render(); }
+    if(action==="openGroupMembers"){ state.editNameError=""; state.modal="groupMembers"; return render(); }
     if(action==="toggleGroupPromote"){
       const g = state.currentGroup;
       if(!isGroupLeader(g)) return;
@@ -2954,9 +2983,21 @@
       if(mem){ mem.promoted = !mem.promoted; await saveGroup(g); }
       return render();
     }
+    if(action==="addGroupPlaceholder"){
+      const g = state.currentGroup;
+      if(!isGroupAdmin(g)) return;
+      const val = document.getElementById("addMemberInput").value.trim();
+      if(!val){ state.editNameError = "Bitte gib einen Namen ein."; return render(); }
+      const fresh = (await loadGroup(g.code)) || g;
+      fresh.members.push({ userId: uid("g"), name: val, promoted:false, placeholder:true });
+      await saveGroup(fresh);
+      state.currentGroup = fresh; state.editNameError = "";
+      return render();
+    }
     if(action==="removeGroupMember"){
       const g = state.currentGroup;
-      if(!isGroupLeader(g)) return;
+      const target = g.members.find(m=>m.userId===el.dataset.user);
+      if(!isGroupLeader(g) && !(isGroupAdmin(g) && target && target.placeholder)) return;
       const userId = el.dataset.user;
       const idx = g.members.findIndex(m=>m.userId===userId);
       if(idx>=0) g.members.splice(idx,1);
