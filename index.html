@@ -1333,6 +1333,12 @@
     state.currentGroup = g; state.currentGroupCode = code; state.view = "groupDetail"; state.modal = null;
     await refreshGroupTournaments(g);
     startPolling();
+    // Neu in der Gruppe (oder noch nicht zugeordnet)? Dann einmal "Wer bist du?" anzeigen.
+    state.claimPrompted = state.claimPrompted || {};
+    if(!state.claimPrompted[code] && canClaimPlaceholder(g) && g.members.some(m=>m.placeholder)){
+      state.claimPrompted[code] = true;
+      state.modal = "claimPick"; state.modalData = {};
+    }
     render();
   }
 
@@ -1396,6 +1402,33 @@
       return render();
     }
     return enterJoinedTournament(res.t, res.mem, code);
+  }
+
+  // Führt ein Mitglied ohne App (Platzhalter) mit einem echten Mitglied zusammen:
+  // Statistik und Archiv-Turniere wandern auf das echte Profil.
+  async function mergePlaceholderInto(g, phId, realId, realName){
+    const ph = g.members.find(m=>m.userId===phId);
+    const real = g.members.find(m=>m.userId===realId);
+    if(!ph || !real || !ph.placeholder) return;
+    ["pointsTable","tournamentsPlayedTable","tournamentWinsTable"].concat(MATCH_STAT_KEYS).forEach(k=>{
+      if(g[k] && g[k][phId]!=null){ g[k][realId] = (g[k][realId]||0) + g[k][phId]; delete g[k][phId]; }
+    });
+    g.members = g.members.filter(m=>m.userId!==phId);
+    if(ph.promoted) real.promoted = true;
+    real.claimed = true;
+    // In allen Turnieren der Gruppe die alte Kennung durch die neue ersetzen.
+    const all = await Promise.all(g.tournamentCodes.map(c=>loadTournament(c)));
+    await Promise.all(all.map(async (t)=>{
+      if(!t) return;
+      const str = JSON.stringify(t);
+      if(!str.includes('"'+phId+'"')) return;
+      const t2 = JSON.parse(str.split('"'+phId+'"').join('"'+realId+'"'));
+      const seen = new Set();
+      t2.players = (t2.players||[]).filter(pl=>{ if(seen.has(pl.id)) return false; seen.add(pl.id); return true; });
+      t2.players.forEach(pl=>{ if(pl.id===realId) pl.name = realName; });
+      if(t2.podium) ["first","second","third"].forEach(k=>{ t2.podium[k] = Array.from(new Set(t2.podium[k]||[])); });
+      await sSet("tournament:"+t.code, t2, true);
+    }));
   }
 
   async function attemptJoinGroup(code){
@@ -1944,6 +1977,14 @@
     <div class="screen" style="padding-top:6px;">
       <div class="split-grid uneven">
         <div>
+          ${(canClaimPlaceholder(g) && g.members.some(m=>m.placeholder)) ? `
+          <div class="banner-info" style="margin-bottom:14px;">
+            Bist du schon als Mitglied ohne App in dieser Gruppe eingetragen? Dann wähle dich aus, damit deine Turniere, Siege und Platzierungen dir zugeordnet werden.
+            <div class="row" style="margin-top:10px; gap:8px;">
+              <button class="btn btn-secondary btn-sm" style="flex:1;" data-action="openClaimPick">Wer bin ich?</button>
+              <button class="btn btn-ghost btn-sm" style="flex:1;" data-action="dismissClaim">Ich war nicht dabei</button>
+            </div>
+          </div>` : ""}
           <div class="section-title">Gesamttabelle</div>
           <div class="banner-info" style="margin-bottom:14px;">Punkte aus allen beendeten Turnieren dieser Gruppe. Die genaue Gewichtung feilen wir später noch aus.</div>
           ${groupPointsTable(g)}
@@ -2347,6 +2388,7 @@
     if(state.modal==="editTournamentName") return modalEditTournamentName();
     if(state.modal==="editGroupName") return modalEditGroupName();
     if(state.modal==="archiveImport") return modalArchiveImport();
+    if(state.modal==="claimPick") return modalClaimPick();
     if(state.modal==="archive") return modalArchive();
     if(state.modal==="editTeamName") return modalEditTeamName();
     return "";
@@ -2543,6 +2585,34 @@
     </div>`;
   }
 
+  // Darf ich mich noch einem "Mitglied ohne App" zuordnen? (Gruppenleiter und bereits Zugeordnete nicht)
+  function canClaimPlaceholder(g){
+    const me = myGroupMembership(g);
+    return !!(me && !me.claimed && !isGroupLeader(g));
+  }
+  function modalClaimPick(){
+    const g = state.currentGroup;
+    const phs = g.members.filter(m=>m.placeholder).sort((a,b)=>a.name.localeCompare(b.name));
+    const rows = phs.map(m=>{
+      const played = (g.tournamentsPlayedTable && g.tournamentsPlayedTable[m.userId]) || 0;
+      return `
+      <div class="team-row" style="align-items:center; cursor:pointer;" data-action="claimPlaceholder" data-user="${esc(m.userId)}">
+        <div class="team-avatar">${esc((m.name[0]||"?").toUpperCase())}</div>
+        <div class="t-info"><div class="t-name">${esc(m.name)}</div><div class="t-players">${played} Turnier${played===1?"":"e"}</div></div>
+        <span style="color:var(--text-soft); font-size:13px;">Das bin ich</span>
+      </div>`;
+    }).join("");
+    return `
+    <div class="modal-overlay" data-action="closeModalBg">
+      <div class="modal" onclick="event.stopPropagation()">
+        <div class="modal-handle"></div>
+        <h2>Wer bist du?</h2>
+        <div class="modal-sub">Diese Mitglieder wurden ohne App hinzugefügt. Wähle dich aus der Liste aus, damit deine bisherigen Turniere, Siege und Platzierungen dir gehören.</div>
+        <div class="stack">${rows}</div>
+        <button class="btn btn-secondary" style="margin-top:16px;" data-action="dismissClaim">Ich bin nicht dabei – neu hinzufügen</button>
+      </div>
+    </div>`;
+  }
   function modalGroupMembers(){
     const g = state.currentGroup;
     const admin = isGroupAdmin(g);
@@ -2554,11 +2624,12 @@
       else if(mem.promoted) roleBadge = "Co-Leiter";
       const pts = (g.pointsTable && g.pointsTable[mem.userId]) || 0;
 
-      const controls = mem.placeholder ? `
+      const claimable = canClaimPlaceholder(g);
+      const controls = mem.placeholder ? ((claimable || admin) ? `
         <div class="row" style="margin:-4px 0 10px 0; gap:8px;">
-          <button class="btn btn-secondary btn-sm" style="flex:1;" data-action="claimPlaceholder" data-user="${esc(mem.userId)}">Das bin ich</button>
+          ${claimable ? `<button class="btn btn-secondary btn-sm" style="flex:1;" data-action="claimPlaceholder" data-user="${esc(mem.userId)}">Das bin ich</button>` : ""}
           ${admin ? `<button class="btn btn-danger btn-sm" style="flex:1;" data-action="removeGroupMember" data-user="${esc(mem.userId)}">Entfernen</button>` : ""}
-        </div>` : (admin && !isLeader) ? `
+        </div>` : "") : (admin && !isLeader) ? `
         <div class="row" style="margin:-4px 0 10px 0; gap:8px;">
           <button class="btn ${mem.promoted?'btn-secondary':'btn-ghost'} btn-sm" style="flex:1;" data-action="toggleGroupPromote" data-user="${esc(mem.userId)}">${mem.promoted?"Co-Leiter entfernen":"Zu Co-Leiter machen"}</button>
           ${leader ? `<button class="btn btn-danger btn-sm" style="flex:1;" data-action="removeGroupMember" data-user="${esc(mem.userId)}">Entfernen</button>` : ""}
@@ -3172,28 +3243,21 @@
     }
     if(action==="claimPlaceholder"){
       const g0 = state.currentGroup;
-      const phId = el.dataset.user, realId = state.identity.id;
+      if(!canClaimPlaceholder(g0)) return;
       const g = (await loadGroup(g0.code)) || g0;
-      const ph = g.members.find(m=>m.userId===phId);
-      if(!ph || !ph.placeholder || !g.members.find(m=>m.userId===realId)) return;
-      ["pointsTable","tournamentsPlayedTable","tournamentWinsTable"].concat(MATCH_STAT_KEYS).forEach(k=>{
-        if(g[k] && g[k][phId]!=null){ g[k][realId] = (g[k][realId]||0) + g[k][phId]; delete g[k][phId]; }
-      });
-      g.members = g.members.filter(m=>m.userId!==phId);
-      const all = await Promise.all(g.tournamentCodes.map(c=>loadTournament(c)));
-      await Promise.all(all.map(async (t)=>{
-        if(!t || !t.archive || !t.players.some(x=>x.id===phId)) return;
-        const hadReal = t.players.some(x=>x.id===realId);
-        t.players = t.players.filter(x=>x.id!==phId);
-        if(!hadReal) t.players.push({ id: realId, name: state.identity.name });
-        ["first","second","third"].forEach(k=>{
-          t.podium[k] = Array.from(new Set((t.podium[k]||[]).map(id=> id===phId ? realId : id)));
-        });
-        await sSet("tournament:"+t.code, t, true);
-      }));
+      await mergePlaceholderInto(g, el.dataset.user, state.identity.id, state.identity.name);
       await saveGroup(g);
-      state.currentGroup = g;
+      state.currentGroup = g; state.modal = null; state.modalData = {};
       await refreshGroupTournaments(g);
+      return render();
+    }
+    if(action==="openClaimPick"){ state.modal="claimPick"; state.modalData={}; return render(); }
+    if(action==="dismissClaim"){
+      const g0 = state.currentGroup;
+      const g = (await loadGroup(g0.code)) || g0;
+      const me = g.members.find(m=>m.userId===state.identity.id);
+      if(me){ me.claimed = true; await saveGroup(g); state.currentGroup = g; }
+      state.modal = null; state.modalData = {};
       return render();
     }
     if(action==="addGroupPlaceholder"){
