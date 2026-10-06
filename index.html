@@ -1900,7 +1900,7 @@
     <div class="topbar">
       <div class="back-btn" data-action="goHome">←</div>
       <div>
-        <h1>👥 ${esc(g.name)}</h1>
+        <h1${admin ? ' data-action="openEditGroupName" style="cursor:pointer;"' : ''}>👥 ${esc(g.name)}${admin ? ' <span style="font-size:13px; color:var(--text-soft); text-decoration:underline; text-underline-offset:2px;">ändern</span>' : ''}</h1>
         <div class="sub"><span data-action="openGroupMembers" style="cursor:pointer;">${esc(roleLabel)} · <span class="live-dot"></span> ${g.members.length} Mitglieder</span></div>
       </div>
       <button class="icon-btn" style="font-size:22px;" data-action="openGroupInvite" title="Einladen">＋👤</button>
@@ -2308,8 +2308,29 @@
     if(state.modal==="editName") return modalEditName();
     if(state.modal==="link") return modalLink();
     if(state.modal==="editTournamentName") return modalEditTournamentName();
+    if(state.modal==="editGroupName") return modalEditGroupName();
     if(state.modal==="editTeamName") return modalEditTeamName();
     return "";
+  }
+
+  function modalEditGroupName(){
+    const g = state.currentGroup;
+    return `
+    <div class="modal-overlay" data-action="closeModalBg">
+      <div class="modal" onclick="event.stopPropagation()">
+        <div class="modal-handle"></div>
+        <h2>Gruppennamen ändern</h2>
+        <div class="field">
+          <label>Name</label>
+          <input class="input" id="editGroupNameInput" value="${esc(g.name)}" maxlength="60">
+        </div>
+        ${state.editNameError ? `<div class="banner-error" style="margin-top:10px;">${esc(state.editNameError)}</div>` : ""}
+        <div class="stack" style="margin-top:16px;">
+          <button class="btn btn-primary" data-action="saveEditGroupName">Speichern</button>
+          <button class="btn btn-ghost" data-action="closeModal">Abbrechen</button>
+        </div>
+      </div>
+    </div>`;
   }
 
   function modalEditTournamentName(){
@@ -2832,6 +2853,23 @@
       const t = state.current;
       if(!isOrganizer(t)) return;
       state.modal = "editTournamentName"; state.editNameError = "";
+      return render();
+    }
+    if(action==="openEditGroupName"){
+      if(!isGroupAdmin(state.currentGroup)) return;
+      state.modal = "editGroupName"; state.editNameError = "";
+      return render();
+    }
+    if(action==="saveEditGroupName"){
+      const g = state.currentGroup;
+      if(!isGroupAdmin(g)) return;
+      const val = document.getElementById("editGroupNameInput").value.trim();
+      if(!val){ state.editNameError = "Bitte gib einen Namen ein."; return render(); }
+      const fresh = (await loadGroup(g.code)) || g;
+      fresh.name = val;
+      await saveGroup(fresh);
+      state.currentGroup = fresh;
+      state.modal = null; state.modalData = {};
       return render();
     }
     if(action==="saveEditTournamentName"){
