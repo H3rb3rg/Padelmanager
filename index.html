@@ -306,6 +306,10 @@
     border-radius:var(--radius); padding:18px; text-align:center;
     font-family:'Bebas Neue'; font-size:21px; letter-spacing:0.4px; margin-bottom:18px;
   }
+  table.standings tr.hl td{ background:rgba(207,230,74,0.16); }
+  table.standings tr.hl .rank{ color:#fff; }
+  table.standings tr.hl td.left{ box-shadow:inset 3px 0 0 var(--ball); }
+  table.standings tbody tr{ transition:background .15s; }
   /* ---- Wide layout: desktop browser windows AND phones rotated to landscape ----
      Pure CSS breakpoint so it reacts instantly to window resize / screen rotation,
      no JS orientation-detection needed. Placed last so it reliably overrides the
@@ -454,6 +458,7 @@
     pendingJoinCode: null,
     pendingGroupJoinCode: null,
     matchFilter: "all", // "all" | "mine"
+    highlighted: {}, // tournamentCode -> [teamId|playerId] hervorgehobene Tabellenzeilen
 
     myGroups: [],
     currentGroup: null,
@@ -1776,6 +1781,17 @@
     </div>`;
   }
 
+  // Hervorgehobene Tabellenzeilen (pro Turnier, nur im Speicher dieser Sitzung)
+  function isHighlighted(t, id){
+    return (state.highlighted[t.code]||[]).includes(id);
+  }
+  function setHighlight(t, id, on){
+    const list = state.highlighted[t.code] || (state.highlighted[t.code] = []);
+    const idx = list.indexOf(id);
+    if(on && idx<0) list.push(id);
+    if(!on && idx>=0) list.splice(idx,1);
+  }
+
   function renderTeamStandings(t){
     const standings = computeStandings(t);
     return `
@@ -1785,8 +1801,8 @@
       </tr></thead>
       <tbody>
         ${standings.map((r,i)=>`
-          <tr>
-            <td class="left" data-action="openTeamMatches" data-team="${esc(r.team.id)}" style="cursor:pointer;"><span class="rank">${i+1}</span>&nbsp; ${esc(r.team.name)}${(t.finished && i===0) ? " 👑" : ""}</td>
+          <tr class="${isHighlighted(t, r.team.id)?'hl':''}" data-action="openTeamMatches" data-team="${esc(r.team.id)}" style="cursor:pointer;">
+            <td class="left"><span class="rank">${i+1}</span>&nbsp; ${esc(r.team.name)}${(t.finished && i===0) ? " 👑" : ""}</td>
             <td>${r.played}</td>
             <td>${r.wins}</td>
             <td>${r.losses}</td>
@@ -1842,7 +1858,7 @@
       <thead><tr><th class="left">Spieler:in</th><th>Sp</th><th>S</th><th>N</th><th>Spiele</th><th>Pkt</th></tr></thead>
       <tbody>
         ${rows.map((r,i)=>`
-          <tr>
+          <tr class="${isHighlighted(t, r.player.id)?'hl':''}" data-action="openPlayerMatches" data-player="${esc(r.player.id)}" style="cursor:pointer;">
             <td class="left"><span class="rank">${i+1}</span>&nbsp; ${esc(r.player.name)}${(t.finished && i===0) ? " 👑" : ""}</td>
             <td>${r.played}</td>
             <td>${r.wins}</td>
@@ -2092,6 +2108,7 @@
     if(state.modal==="reassignTeam") return modalReassignTeam();
     if(state.modal==="removeMember") return modalRemoveMember();
     if(state.modal==="teamMatches") return modalTeamMatches();
+    if(state.modal==="playerMatches") return modalPlayerMatches();
     if(state.modal==="groupInvite") return modalGroupInvite();
     if(state.modal==="groupMembers") return modalGroupMembers();
     if(state.modal==="groupDeleteConfirm") return modalGroupDeleteConfirm();
@@ -2266,7 +2283,32 @@
         <h2>${esc(name)}</h2>
         <div class="modal-sub">Alle Spiele dieses Teams.</div>
         <div class="stack">${body}</div>
-        <button class="btn btn-ghost" style="margin-top:16px;" data-action="closeModal">Schließen</button>
+        <button class="btn btn-secondary" style="margin-top:16px;" data-action="toggleHighlight" data-id="${esc(teamId)}">${isHighlighted(t, teamId) ? "Hervorhebung in der Tabelle aufheben" : "In der Tabelle hervorheben"}</button>
+        <button class="btn btn-ghost" style="margin-top:10px;" data-action="closeModal">Schließen</button>
+      </div>
+    </div>`;
+  }
+
+  function modalPlayerMatches(){
+    const t = state.current;
+    const pid = state.modalData.playerId;
+    const name = playerName(t, pid);
+    let body = "";
+    (t.ligaRounds||[]).forEach(rd=>{
+      const ms = rd.matches.filter(m=> m.pairA.includes(pid) || m.pairB.includes(pid));
+      if(!ms.length) return;
+      body += `<div class="leg-badge">Runde ${rd.index+1}</div>${ms.map(m=>matchCardHtml(t,m,rd.index)).join("")}`;
+    });
+    if(!body) body = `<div class="empty">Keine Spiele.</div>`;
+    return `
+    <div class="modal-overlay" data-action="closeModalBg">
+      <div class="modal" onclick="event.stopPropagation()">
+        <div class="modal-handle"></div>
+        <h2>${esc(name)}</h2>
+        <div class="modal-sub">Alle Spiele dieser Person.</div>
+        <div class="stack">${body}</div>
+        <button class="btn btn-secondary" style="margin-top:16px;" data-action="toggleHighlight" data-id="${esc(pid)}">${isHighlighted(t, pid) ? "Hervorhebung in der Tabelle aufheben" : "In der Tabelle hervorheben"}</button>
+        <button class="btn btn-ghost" style="margin-top:10px;" data-action="closeModal">Schließen</button>
       </div>
     </div>`;
   }
@@ -2945,8 +2987,21 @@
     if(action==="switchTab"){ state.tab = el.dataset.tab; return render(); }
     if(action==="setMatchFilter"){ state.matchFilter = el.dataset.filter; return render(); }
     if(action==="openTeamMatches"){
+      setHighlight(state.current, el.dataset.team, true);
       state.modal = "teamMatches";
       state.modalData = { teamId: el.dataset.team };
+      return render();
+    }
+    if(action==="openPlayerMatches"){
+      setHighlight(state.current, el.dataset.player, true);
+      state.modal = "playerMatches";
+      state.modalData = { playerId: el.dataset.player };
+      return render();
+    }
+    if(action==="toggleHighlight"){
+      const t = state.current;
+      const id = el.dataset.id;
+      setHighlight(t, id, !isHighlighted(t, id));
       return render();
     }
 
