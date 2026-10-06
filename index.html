@@ -1887,7 +1887,7 @@
     return `
     <div style="overflow-x:auto;">
     <table class="standings">
-      <thead><tr><th class="left">Mitglied</th><th>🥇</th><th>🥈</th><th>🥉</th><th class="wide-col">Turniere</th><th class="wide-col">Quote</th><th class="wide-col">Punkte</th><th class="wide-col">Spiel&shy;siege</th><th class="wide-col">Spiel&shy;nieder&shy;lagen</th><th class="wide-col">Spiel&shy;quote</th><th class="wide-col">Spiel&shy;punkte</th></tr></thead>
+      <thead><tr><th class="left">Mitglied</th><th>🥇</th><th>🥈</th><th>🥉</th><th class="wide-col">Turniere</th><th class="wide-col">Siegquote</th><th class="wide-col">Punkte</th><th class="wide-col">Spiel&shy;siege</th><th class="wide-col">Spiel&shy;nieder&shy;lagen</th><th class="wide-col">Spiel&shy;quote</th><th class="wide-col">Spiel&shy;punkte</th></tr></thead>
       <tbody>
         ${rows.map((r,i)=>`
           <tr>
@@ -2558,10 +2558,10 @@
         <div class="row" style="margin:-4px 0 10px 0; gap:8px;">
           <button class="btn btn-secondary btn-sm" style="flex:1;" data-action="claimPlaceholder" data-user="${esc(mem.userId)}">Das bin ich</button>
           ${admin ? `<button class="btn btn-danger btn-sm" style="flex:1;" data-action="removeGroupMember" data-user="${esc(mem.userId)}">Entfernen</button>` : ""}
-        </div>` : (leader && !isLeader) ? `
+        </div>` : (admin && !isLeader) ? `
         <div class="row" style="margin:-4px 0 10px 0; gap:8px;">
           <button class="btn ${mem.promoted?'btn-secondary':'btn-ghost'} btn-sm" style="flex:1;" data-action="toggleGroupPromote" data-user="${esc(mem.userId)}">${mem.promoted?"Co-Leiter entfernen":"Zu Co-Leiter machen"}</button>
-          <button class="btn btn-danger btn-sm" style="flex:1;" data-action="removeGroupMember" data-user="${esc(mem.userId)}">Entfernen</button>
+          ${leader ? `<button class="btn btn-danger btn-sm" style="flex:1;" data-action="removeGroupMember" data-user="${esc(mem.userId)}">Entfernen</button>` : ""}
         </div>` : "";
 
       return `
@@ -2580,7 +2580,7 @@
       <div class="modal" onclick="event.stopPropagation()">
         <div class="modal-handle"></div>
         <h2>Gruppenmitglieder</h2>
-        <div class="modal-sub">${g.members.length} dabei. ${leader ? "Als Gruppenleiter kannst du Co-Leiter ernennen oder Mitglieder entfernen." : ""}</div>
+        <div class="modal-sub">${g.members.length} dabei. ${admin ? ("Du kannst Co-Leiter ernennen" + (leader ? " und Mitglieder entfernen." : ".")) : ""}</div>
         <div class="stack">${rows}</div>
         ${admin ? `
         <div class="field" style="margin-top:16px;">
@@ -3084,10 +3084,11 @@
     }
     if(action==="openGroupMembers"){ state.editNameError=""; state.modal="groupMembers"; return render(); }
     if(action==="toggleGroupPromote"){
-      const g = state.currentGroup;
-      if(!isGroupLeader(g)) return;
+      const g0 = state.currentGroup;
+      if(!isGroupAdmin(g0)) return;
+      const g = (await loadGroup(g0.code)) || g0;
       const mem = g.members.find(m=>m.userId===el.dataset.user);
-      if(mem){ mem.promoted = !mem.promoted; await saveGroup(g); }
+      if(mem && mem.userId!==g.leaderId && !mem.placeholder){ mem.promoted = !mem.promoted; await saveGroup(g); state.currentGroup = g; }
       return render();
     }
     if(action==="openArchiveImport"){
