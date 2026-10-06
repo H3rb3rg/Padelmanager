@@ -314,7 +314,10 @@
      Pure CSS breakpoint so it reacts instantly to window resize / screen rotation,
      no JS orientation-detection needed. Placed last so it reliably overrides the
      base rules above regardless of property overlap (e.g. .screen padding). */
+  .wide-col{ display:none; }
   @media (min-width:760px), (orientation:landscape) and (min-width:560px){
+    .wide-col{ display:table-cell; font-size:12px; padding-left:6px; padding-right:6px; }
+    td.wide-col{ white-space:nowrap; }
     body{ padding:28px 20px; align-items:flex-start; }
     #app{
       max-width:1180px; min-height:calc(100vh - 56px); border-radius:20px;
@@ -892,6 +895,7 @@
     if(!trimmed) return false;
     state.identity.name = trimmed;
     await sSet("identity", state.identity, false);
+    await pushUserData({});
     return true;
   }
   async function getMyCodes(){
@@ -900,12 +904,91 @@
   }
   async function addMyCode(code){
     const list = await getMyCodes();
-    if(!list.includes(code)){ list.push(code); await sSet("my-codes", list, false); }
+    if(!list.includes(code)){ list.push(code); await sSet("my-codes", list, false); await pushUserData({ codes: list }); }
   }
   async function removeMyCode(code){
     const list = await getMyCodes();
     const idx = list.indexOf(code);
-    if(idx>=0){ list.splice(idx,1); await sSet("my-codes", list, false); }
+    if(idx>=0){ list.splice(idx,1); await sSet("my-codes", list, false); await pushUserData({ codes: list }); }
+  }
+
+  // ---------- Verknüpfungs-Code (mehrere Geräte, ein "Profil") ----------
+  // Es gibt kein Konto: Das Profil ist nur die zufällige Nutzer-ID dieses Geräts. Beim Verknüpfen
+  // übernimmt ein zweites Gerät diese ID. Damit beide Geräte dieselben Turniere/Gruppen sehen,
+  // liegen die Listen zusätzlich in der Cloud ("userdata:<id>").
+  const LINK_TTL = 15*60*1000;
+  function genLinkCode(){
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let c = "";
+    for(let i=0;i<8;i++) c += chars[Math.floor(Math.random()*chars.length)];
+    return c;
+  }
+  function fmtLinkCode(c){ return c.slice(0,4) + "-" + c.slice(4); }
+  async function pushUserData(patch){
+    if(!db || !state.identity) return;
+    const key = "userdata:" + state.identity.id;
+    const cur = (await sGet(key, true)) || {};
+    const next = Object.assign({ codes:[], groups:[] }, cur, patch, { name: state.identity.name });
+    await sSet(key, next, true);
+  }
+  async function syncUserData(){
+    if(!db || !state.identity) return;
+    const key = "userdata:" + state.identity.id;
+    const cloud = await sGet(key, true);
+    if(!cloud){
+      // Erstes Mal auf diesem Gerät: bestehende lokale Listen in die Cloud legen.
+      const seeded = await sGet("userdata-seeded", false);
+      if(!seeded){
+        await sSet(key, { codes: await getMyCodes(), groups: await getMyGroupCodes(), name: state.identity.name }, true);
+        await sSet("userdata-seeded", true, false);
+      }
+      return;
+    }
+    await sSet("userdata-seeded", true, false);
+    await sSet("my-codes", Array.isArray(cloud.codes) ? cloud.codes : [], false);
+    await sSet("my-group-codes", Array.isArray(cloud.groups) ? cloud.groups : [], false);
+    if(cloud.name && cloud.name!==state.identity.name){
+      state.identity.name = cloud.name;
+      await sSet("identity", state.identity, false);
+    }
+  }
+
+  function modalLink(){
+    const d = state.modalData || {};
+    const err = d.error ? `<div class="banner-error" style="margin-top:10px;">${esc(d.error)}</div>` : "";
+    if(d.linkCode){
+      return `
+      <div class="modal-overlay" data-action="closeModalBg">
+        <div class="modal" onclick="event.stopPropagation()">
+          <div class="modal-handle"></div>
+          <h2>Dein Verknüpfungs-Code</h2>
+          <div class="modal-sub">Öffne die App auf dem anderen Gerät, tippe dort auf „Geräte verknüpfen“ und gib diesen Code ein. Er gilt 15 Minuten und nur einmal.</div>
+          <div style="text-align:center; font-family:'JetBrains Mono',monospace; font-size:32px; letter-spacing:3px; font-weight:700; margin:18px 0; color:var(--ball);">${esc(fmtLinkCode(d.linkCode))}</div>
+          <button class="btn btn-ghost" data-action="closeModal">Fertig</button>
+        </div>
+      </div>`;
+    }
+    return `
+    <div class="modal-overlay" data-action="closeModalBg">
+      <div class="modal" onclick="event.stopPropagation()">
+        <div class="modal-handle"></div>
+        <h2>Geräte verknüpfen</h2>
+        <div class="modal-sub">So siehst du auf Handy und PC dieselben Turniere und Gruppen — ohne Konto, ohne E-Mail.</div>
+        ${state.identity ? `
+        <button class="btn btn-primary" data-action="makeLinkCode">Code für ein anderes Gerät erzeugen</button>
+        <div style="text-align:center; color:var(--text-soft); font-size:12px; margin:14px 0 6px;">– oder dieses Gerät mit einem Code verbinden –</div>` : ""}
+        <div class="field">
+          <label>Code vom anderen Gerät</label>
+          <input class="input" id="linkInput" placeholder="XXXX-XXXX" maxlength="9" autocapitalize="characters" autocomplete="off">
+        </div>
+        ${state.identity ? `<div class="banner-info" style="margin-top:10px;">Achtung: Danach gehört dieses Gerät zum Profil des anderen Geräts. Die Turnier- und Gruppenliste, die du hier bisher hattest, wird ersetzt (die Turniere selbst bleiben bestehen).</div>` : ""}
+        ${err}
+        <div class="stack" style="margin-top:16px;">
+          <button class="btn ${state.identity ? "btn-secondary" : "btn-primary"}" data-action="applyLinkCode">Verknüpfen</button>
+          <button class="btn btn-ghost" data-action="closeModal">Abbrechen</button>
+        </div>
+      </div>
+    </div>`;
   }
   function normalizeTournament(t){
     if(!t) return t;
@@ -951,13 +1034,15 @@
   }
   async function addMyGroupCode(code){
     const list = await getMyGroupCodes();
-    if(!list.includes(code)){ list.push(code); await sSet("my-group-codes", list, false); }
+    if(!list.includes(code)){ list.push(code); await sSet("my-group-codes", list, false); await pushUserData({ groups: list }); }
   }
   async function removeMyGroupCode(code){
     const list = await getMyGroupCodes();
     const idx = list.indexOf(code);
-    if(idx>=0){ list.splice(idx,1); await sSet("my-group-codes", list, false); }
+    if(idx>=0){ list.splice(idx,1); await sSet("my-group-codes", list, false); await pushUserData({ groups: list }); }
   }
+  const MATCH_STAT_KEYS = ["matchWinsTable","matchLossesTable","pointsForTable","pointsAgainstTable"];
+  const MATCH_STATS_VERSION = 1;
   function normalizeGroup(g){
     if(!g) return g;
     if(!g.members) g.members = [];
@@ -966,6 +1051,8 @@
     if(!g.tournamentsPlayedTable) g.tournamentsPlayedTable = {};
     if(!g.tournamentWinsTable) g.tournamentWinsTable = {};
     if(g.statsVersion===undefined) g.statsVersion = 0;
+    MATCH_STAT_KEYS.forEach(k=>{ if(!g[k]) g[k] = {}; });
+    if(g.matchStatsVersion===undefined) g.matchStatsVersion = 0;
     return g;
   }
   async function loadGroup(code){
@@ -1053,6 +1140,44 @@
         });
       });
     }
+    creditGroupMatchStats(g, t);
+  }
+
+  // Einzelspiel-Statistik über alle Gruppen-Turniere: Spielsiege/-niederlagen und
+  // erzielte/kassierte Spielpunkte (z. B. 20:12). Bei Teams bekommen beide Mitglieder die Werte.
+  function creditGroupMatchStats(g, t){
+    MATCH_STAT_KEYS.forEach(k=>{ g[k] = g[k] || {}; });
+    const add = (key, userId, n)=>{ if(userId && n) g[key][userId] = (g[key][userId]||0) + n; };
+    const credit = (userId, w, l, pf, pa)=>{
+      add("matchWinsTable", userId, w); add("matchLossesTable", userId, l);
+      add("pointsForTable", userId, pf); add("pointsAgainstTable", userId, pa);
+    };
+    if(t.type==="liga" && t.ligaMode==="individual"){
+      computeIndividualStandings(t).forEach(r=> credit(r.player.id, r.wins, r.losses, r.gamesW, r.gamesL));
+    } else if(t.type==="liga" && t.ligaMode==="teams"){
+      computeStandings(t).forEach(r=>{
+        (r.team.memberUserIds||[]).forEach(uid=> credit(uid, r.wins, r.losses, r.gamesW, r.gamesL));
+      });
+    } else if(t.type==="ko"){
+      t.teams.forEach(team=>{
+        let w=0,l=0,pf=0,pa=0;
+        t.matches.forEach(m=>{
+          const isA = m.teamAId===team.id, isB = m.teamBId===team.id;
+          if(!isA && !isB) return;
+          const ev = evaluateMatch(m, t.setTarget);
+          if(!ev.completed) return;
+          const sc = m.sets[0];
+          pf += isA ? sc.a : sc.b; pa += isA ? sc.b : sc.a;
+          if((ev.winnerSide==="A" && isA) || (ev.winnerSide==="B" && isB)) w++; else l++;
+        });
+        (team.memberUserIds||[]).forEach(uid=> credit(uid, w, l, pf, pa));
+      });
+    }
+  }
+  function removeUserFromGroupStats(g, userId){
+    ["pointsTable","tournamentsPlayedTable","tournamentWinsTable"].concat(MATCH_STAT_KEYS).forEach(k=>{
+      if(g[k]) delete g[k][userId];
+    });
   }
 
   // ---------- Navigation ----------
@@ -1114,6 +1239,7 @@
     stopPolling();
     state.view = "home"; state.modal=null; state.current=null; state.currentCode=null;
     state.currentGroup=null; state.currentGroupCode=null;
+    await syncUserData();
     await refreshMyTournamentsList();
     await refreshMyGroupsList();
     render();
@@ -1129,8 +1255,17 @@
     g.pointsTable = {};
     g.tournamentsPlayedTable = {};
     g.tournamentWinsTable = {};
+    MATCH_STAT_KEYS.forEach(k=>{ g[k] = {}; });
     tournaments.forEach(t=>{ if(t.finished) creditGroupPoints(g, t); });
     g.statsVersion = GROUP_STATS_VERSION;
+    g.matchStatsVersion = MATCH_STATS_VERSION;
+  }
+  // Nur die neuen Einzelspiel-Spalten nachberechnen — lässt Punkte/Siege (inkl. bereits
+  // gelöschter Turniere) unangetastet.
+  function recomputeGroupMatchStats(g, tournaments){
+    MATCH_STAT_KEYS.forEach(k=>{ g[k] = {}; });
+    tournaments.forEach(t=>{ if(t.finished) creditGroupMatchStats(g, t); });
+    g.matchStatsVersion = MATCH_STATS_VERSION;
   }
 
   async function refreshGroupTournaments(g){
@@ -1152,6 +1287,9 @@
     if(g.statsVersion !== GROUP_STATS_VERSION){
       // Nachberechnung: entweder erstmalig, oder weil sich die Punkteformel seitdem geändert hat.
       recomputeGroupStats(g, results);
+      needsSave = true;
+    } else if(g.matchStatsVersion !== MATCH_STATS_VERSION){
+      recomputeGroupMatchStats(g, results);
       needsSave = true;
     }
     if(needsSave) await saveGroup(g);
@@ -1269,6 +1407,49 @@
     else if(state.view==="groupDetail") content = viewGroupDetail();
     app.innerHTML = content + (state.modal ? renderModal() : "");
     attachHandlers();
+    syncHistory();
+  }
+
+  // ---------- System-Zurück-Taste ----------
+  // Pro "Ebene" tiefer (Unterseite, Dialog) liegt ein Eintrag im Browser-Verlauf. Drückt man
+  // Zurück, passiert dasselbe wie beim ←-Pfeil der App; auf der Startseite beendet sich die App normal.
+  let histDepth = 0;
+  let ignorePops = 0;
+  function desiredDepth(){
+    let d = 0;
+    const v = state.view;
+    if(v==="create"){ d = (state.draft && state.draft.groupCode) ? 2 : 1; }
+    else if(v==="createTeams"){ d = (state.draft && state.draft.groupCode) ? 3 : 2; }
+    else if(v==="detail"){ d = (state.current && state.current.groupCode) ? 2 : 1; }
+    else if(v==="join" || v==="createGroup" || v==="joinGroup" || v==="groupDetail"){ d = 1; }
+    if(state.modal) d += 1;
+    return d;
+  }
+  function syncHistory(){
+    try{
+      const want = desiredDepth();
+      while(histDepth < want){ histDepth++; history.pushState({ padel: histDepth }, ""); }
+      if(histDepth > want){
+        const n = histDepth - want;
+        histDepth = want;
+        ignorePops++;
+        history.go(-n);
+      }
+    }catch(e){ /* History API nicht verfügbar */ }
+  }
+  window.addEventListener("popstate", ()=>{
+    if(ignorePops > 0){ ignorePops--; return; }
+    if(histDepth > 0) histDepth--;
+    inAppBack();
+  });
+  function inAppBack(){
+    if(state.modal){ state.modal=null; state.modalData={}; return render(); }
+    const v = state.view;
+    if(v==="createTeams") return handleAction("backToStep1", document.body);
+    if(v==="create") return (state.draft && state.draft.groupCode) ? openGroupDetail(state.draft.groupCode) : goHome();
+    if(v==="detail") return (state.current && state.current.groupCode) ? openGroupDetail(state.current.groupCode) : goHome();
+    if(v==="join" || v==="createGroup" || v==="joinGroup" || v==="groupDetail") return goHome();
+    return render();
   }
 
   function viewLoading(){
@@ -1291,6 +1472,7 @@
           <input class="input" id="nameInput" placeholder="z. B. Alex" maxlength="40">
         </div>
         <button class="btn btn-primary" data-action="submitName">Los geht's</button>
+        <button class="btn btn-ghost" data-action="openLink">🔗 Ich habe schon ein Profil auf einem anderen Gerät</button>
       </div>
     </div>`;
   }
@@ -1341,6 +1523,7 @@
       </div>
       <div data-action="openEditName" style="cursor:pointer; font-size:12.5px; color:var(--text-soft); padding:0 4px 10px 4px; display:flex; align-items:center; gap:6px;">
         👤 ${esc(state.identity.name)} <span style="text-decoration:underline; text-underline-offset:2px;">ändern</span>
+        <span data-action="openLink" style="margin-left:10px; text-decoration:underline; text-underline-offset:2px;" onclick="event.stopPropagation()">🔗 Geräte verknüpfen</span>
       </div>
     </div>
     <div class="screen" style="padding-top:6px;">
@@ -1661,11 +1844,16 @@
       const played = (g.tournamentsPlayedTable && g.tournamentsPlayedTable[mem.userId]) || 0;
       const wins = (g.tournamentWinsTable && g.tournamentWinsTable[mem.userId]) || 0;
       const ratio = played>0 ? wins/played : 0;
-      return { mem, points, played, wins, ratio };
+      const mW = (g.matchWinsTable && g.matchWinsTable[mem.userId]) || 0;
+      const mL = (g.matchLossesTable && g.matchLossesTable[mem.userId]) || 0;
+      const pF = (g.pointsForTable && g.pointsForTable[mem.userId]) || 0;
+      const pA = (g.pointsAgainstTable && g.pointsAgainstTable[mem.userId]) || 0;
+      return { mem, points, played, wins, ratio, mW, mL, pF, pA };
     }).sort((a,b)=> b.ratio-a.ratio || b.points-a.points);
     return `
+    <div style="overflow-x:auto;">
     <table class="standings">
-      <thead><tr><th class="left">Mitglied</th><th>Turniere</th><th>Siege</th><th>Quote</th><th>Punkte</th></tr></thead>
+      <thead><tr><th class="left">Mitglied</th><th>Turniere</th><th>Siege</th><th>Quote</th><th>Punkte</th><th class="wide-col">Spiel&shy;siege</th><th class="wide-col">Spiel&shy;nieder&shy;lagen</th><th class="wide-col">Spiel&shy;quote</th><th class="wide-col">Spiel&shy;punkte</th></tr></thead>
       <tbody>
         ${rows.map((r,i)=>`
           <tr>
@@ -1674,9 +1862,14 @@
             <td>${r.wins}</td>
             <td class="mono">${r.played>0 ? Math.round(r.ratio*100)+"%" : "–"}</td>
             <td class="pts">${r.points}</td>
+            <td class="wide-col">${r.mW}</td>
+            <td class="wide-col">${r.mL}</td>
+            <td class="wide-col mono">${(r.mW+r.mL)>0 ? Math.round(r.mW/(r.mW+r.mL)*100)+"%" : "–"}</td>
+            <td class="wide-col mono">${r.pF}:${r.pA}</td>
           </tr>`).join("")}
       </tbody>
-    </table>`;
+    </table>
+    </div>`;
   }
 
   function viewGroupDetail(){
@@ -1858,7 +2051,7 @@
       <thead><tr><th class="left">Spieler:in</th><th>Sp</th><th>S</th><th>N</th><th>Spiele</th><th>Pkt</th></tr></thead>
       <tbody>
         ${rows.map((r,i)=>`
-          <tr class="${isHighlighted(t, r.player.id)?'hl':''}" data-action="openPlayerMatches" data-player="${esc(r.player.id)}" style="cursor:pointer;">
+          <tr data-action="openPlayerMatches" data-player="${esc(r.player.id)}" style="cursor:pointer;">
             <td class="left"><span class="rank">${i+1}</span>&nbsp; ${esc(r.player.name)}${(t.finished && i===0) ? " 👑" : ""}</td>
             <td>${r.played}</td>
             <td>${r.wins}</td>
@@ -2113,6 +2306,7 @@
     if(state.modal==="groupMembers") return modalGroupMembers();
     if(state.modal==="groupDeleteConfirm") return modalGroupDeleteConfirm();
     if(state.modal==="editName") return modalEditName();
+    if(state.modal==="link") return modalLink();
     if(state.modal==="editTournamentName") return modalEditTournamentName();
     if(state.modal==="editTeamName") return modalEditTeamName();
     return "";
@@ -2307,8 +2501,7 @@
         <h2>${esc(name)}</h2>
         <div class="modal-sub">Alle Spiele dieser Person.</div>
         <div class="stack">${body}</div>
-        <button class="btn btn-secondary" style="margin-top:16px;" data-action="toggleHighlight" data-id="${esc(pid)}">${isHighlighted(t, pid) ? "Hervorhebung in der Tabelle aufheben" : "In der Tabelle hervorheben"}</button>
-        <button class="btn btn-ghost" style="margin-top:10px;" data-action="closeModal">Schließen</button>
+        <button class="btn btn-ghost" style="margin-top:16px;" data-action="closeModal">Schließen</button>
       </div>
     </div>`;
   }
@@ -2594,6 +2787,39 @@
       return;
     }
     if(action==="goHome") return goHome();
+    if(action==="openLink"){
+      state.modal="link";
+      state.modalData = db ? {} : { error:"Geräte verknüpfen funktioniert nur mit eingerichtetem Cloud-Speicher (Firebase)." };
+      return render();
+    }
+    if(action==="makeLinkCode"){
+      const code = genLinkCode();
+      await pushUserData({ codes: await getMyCodes(), groups: await getMyGroupCodes() });
+      const ok = await sSet("link:"+code, { identity: state.identity, createdAt: Date.now() }, true);
+      if(!ok){ state.modalData = { error:"Code konnte nicht erstellt werden — Verbindung prüfen." }; return render(); }
+      state.modalData = { linkCode: code };
+      return render();
+    }
+    if(action==="applyLinkCode"){
+      const raw = (document.getElementById("linkInput").value||"").toUpperCase().replace(/[^A-Z0-9]/g,"");
+      if(raw.length!==8){ state.modalData = { error:"Bitte gib den 8-stelligen Code ein." }; return render(); }
+      const doc = await sGet("link:"+raw, true);
+      if(!doc || !doc.identity || !doc.identity.id || (Date.now()-(doc.createdAt||0)) > LINK_TTL){
+        state.modalData = { error:"Code ungültig oder abgelaufen. Erzeuge auf dem anderen Gerät einen neuen." };
+        return render();
+      }
+      await sDelete("link:"+raw, true);
+      state.identity = { id: doc.identity.id, name: doc.identity.name };
+      await sSet("identity", state.identity, false);
+      await sSet("my-codes", [], false);
+      await sSet("my-group-codes", [], false);
+      await syncUserData();
+      state.modal = null; state.modalData = {};
+      await goHome();
+      if(state.pendingJoinCode) await tryAutoJoinFromUrl();
+      if(state.pendingGroupJoinCode) await tryAutoJoinGroupFromUrl();
+      return;
+    }
     if(action==="openEditName"){ state.modal="editName"; state.editNameError=""; return render(); }
     if(action==="saveEditName"){
       const val = document.getElementById("editNameInput").value.trim();
@@ -2696,9 +2922,7 @@
       const userId = el.dataset.user;
       const idx = g.members.findIndex(m=>m.userId===userId);
       if(idx>=0) g.members.splice(idx,1);
-      if(g.pointsTable) delete g.pointsTable[userId];
-      if(g.tournamentsPlayedTable) delete g.tournamentsPlayedTable[userId];
-      if(g.tournamentWinsTable) delete g.tournamentWinsTable[userId];
+      removeUserFromGroupStats(g, userId);
       await saveGroup(g);
       return render();
     }
@@ -2711,9 +2935,7 @@
       } else {
         const idx = g.members.findIndex(m=>m.userId===state.identity.id);
         if(idx>=0) g.members.splice(idx,1);
-        if(g.pointsTable) delete g.pointsTable[state.identity.id];
-        if(g.tournamentsPlayedTable) delete g.tournamentsPlayedTable[state.identity.id];
-        if(g.tournamentWinsTable) delete g.tournamentWinsTable[state.identity.id];
+        removeUserFromGroupStats(g, state.identity.id);
         await saveGroup(g);
       }
       await removeMyGroupCode(g.code);
@@ -2993,7 +3215,6 @@
       return render();
     }
     if(action==="openPlayerMatches"){
-      setHighlight(state.current, el.dataset.player, true);
       state.modal = "playerMatches";
       state.modalData = { playerId: el.dataset.player };
       return render();
@@ -3185,7 +3406,10 @@
     }
     if(action==="backToMembers"){ state.modal = "members"; state.modalData = {}; return render(); }
 
-    if(action==="closeModal" || action==="closeModalBg"){ state.modal=null; state.modalData={}; return render(); }
+    if(action==="closeModal" || action==="closeModalBg"){
+      if(state.modal==="link" && state.modalData && state.modalData.linkCode){ sDelete("link:"+state.modalData.linkCode, true); }
+      state.modal=null; state.modalData={}; return render();
+    }
 
     if(action==="copyCode"){
       try{ await navigator.clipboard.writeText(state.current.code); }catch(e){}
@@ -3292,6 +3516,7 @@
 
     state.identity = await loadIdentity();
     if(!state.identity){ state.view = "onboarding"; return render(); }
+    await syncUserData();
     await refreshMyTournamentsList();
     await refreshMyGroupsList();
     state.view = "home";
