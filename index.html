@@ -1271,6 +1271,7 @@
     stopPolling();
     state.view = "home"; state.modal=null; state.current=null; state.currentCode=null;
     state.currentGroup=null; state.currentGroupCode=null;
+    sSet("last-view", null, false);
     await syncUserData();
     await refreshMyTournamentsList();
     await refreshMyGroupsList();
@@ -1331,6 +1332,7 @@
     const g = await loadGroup(code);
     if(!g){ return goHome(); }
     state.currentGroup = g; state.currentGroupCode = code; state.view = "groupDetail"; state.modal = null;
+    sSet("last-view", { type:"group", code, ts: Date.now() }, false);
     await refreshGroupTournaments(g);
     startPolling();
     // Neu in der Gruppe (oder noch nicht zugeordnet)? Dann einmal "Wer bist du?" anzeigen.
@@ -1361,6 +1363,7 @@
     if(!t){ return goHome(); }
     t = await syncGroupRosterIfNeeded(t);
     state.current = t; state.currentCode = code; state.view = "detail"; state.tab = "table"; state.modal=null;
+    sSet("last-view", { type:"tournament", code, ts: Date.now() }, false);
     state.teamPickSelection = [];
     startPolling();
     render();
@@ -1473,6 +1476,22 @@
     app.innerHTML = content + (state.modal ? renderModal() : "");
     attachHandlers();
     syncHistory();
+    saveLastView();
+  }
+
+  // Beim Neuladen (Aktualisieren) dort weitermachen, wo man war. Gilt nur für diese
+  // Sitzung: Wer die App ganz schließt und neu öffnet, startet wie gewohnt auf der Startseite.
+  function saveLastView(){
+    try{
+      let v = null;
+      if(state.view==="detail" && state.currentCode) v = { t:"detail", code: state.currentCode, tab: state.tab };
+      else if(state.view==="groupDetail" && state.currentGroupCode) v = { t:"group", code: state.currentGroupCode };
+      if(v) sessionStorage.setItem("padel-last-view", JSON.stringify(v));
+      else if(state.view!=="loading" && state.view!=="onboarding") sessionStorage.removeItem("padel-last-view");
+    }catch(e){}
+  }
+  function readLastView(){
+    try{ return JSON.parse(sessionStorage.getItem("padel-last-view")||"null"); }catch(e){ return null; }
   }
 
   // ---------- System-Zurück-Taste ----------
@@ -2617,7 +2636,8 @@
     const g = state.currentGroup;
     const admin = isGroupAdmin(g);
     const leader = isGroupLeader(g);
-    const rows = g.members.map(mem=>{
+    const sortedMembers = g.members.slice().sort((a,b)=> a.name.localeCompare(b.name, "de", { sensitivity:"base" }));
+    const rows = sortedMembers.map(mem=>{
       const isLeader = mem.userId===g.leaderId;
       let roleBadge = "Mitglied";
       if(isLeader) roleBadge = "Gruppenleiter";
@@ -3870,15 +3890,29 @@
       }
     }catch(e){ /* ignore malformed URLs */ }
 
+    const lastView = readLastView();
     state.identity = await loadIdentity();
     if(!state.identity){ state.view = "onboarding"; return render(); }
     await syncUserData();
     await refreshMyTournamentsList();
     await refreshMyGroupsList();
+    // Nach einem Neuladen/Aktualisieren dort weitermachen, wo man war (max. 12 Stunden alt).
+    const lv = (state.pendingJoinCode || state.pendingGroupJoinCode) ? null : await sGet("last-view", false);
+    if(lv && lv.code && (Date.now() - (lv.ts||0)) < 12*3600*1000){
+      state.view = "home";
+      return lv.type==="group" ? openGroupDetail(lv.code) : openDetail(lv.code);
+    }
     state.view = "home";
     render();
     if(state.pendingJoinCode) await tryAutoJoinFromUrl();
-    if(state.pendingGroupJoinCode) await tryAutoJoinGroupFromUrl();
+    else if(state.pendingGroupJoinCode) await tryAutoJoinGroupFromUrl();
+    else if(lastView && lastView.code){
+      if(lastView.t==="group") await openGroupDetail(lastView.code);
+      else if(lastView.t==="detail"){
+        await openDetail(lastView.code);
+        if(state.view==="detail" && lastView.tab){ state.tab = lastView.tab; render(); }
+      }
+    }
   }
   boot();
 
